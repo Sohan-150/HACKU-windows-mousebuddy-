@@ -38,7 +38,11 @@ export async function askScreen(question: string, at: { x: number; y: number; t:
     out.ms = Math.round(performance.now() - t0);
     return out;
   };
-  if (!p.window) { out.answer = "I can't see a window under your pointer. Point at something in an app or web page and ask again."; return finish(); }
+  if (!p.window) {
+    out.answer = p.typed ? "I can't see the window you were using. Click on it, then ask again (or point at it, hold the talk keys and ask)."
+      : "I can't see a window under your pointer. Point at something in an app or web page and ask again.";
+    return finish();
+  }
 
   const targets: { el: PointedElement; shape: Shape; label: string }[] = [];
   if (deps.claude) {
@@ -86,6 +90,11 @@ export function markTarget(m: ScreenMark, p: PointerContext): PointedElement | u
 /** Without Claude: name the control under the pointer and read its text; say plainly what needs Claude. */
 export function whatIsThis(question: string, p: PointerContext): string {
   const where = p.window ? ` in "${p.window.title}"` : "";
+  // Typed in the panel, or "what am I looking at": there is no pointed-at control, so name the window.
+  if (p.window && (p.typed || /\b(looking at|seeing|on (my|the) screen)\b/i.test(question))) {
+    const app = p.window.app && !p.window.title.toLowerCase().includes(p.window.app.replace(/\.exe$/i, "").toLowerCase()) ? ` (${p.window.app})` : "";
+    return `You're looking at "${p.window.title}"${app}. Describing what is in it needs a Claude API key.`;
+  }
   const e = p.element?.label || p.element?.value ? p.element : p.nearby[0];
   if (!e) return `I can't read anything under your pointer${where}.`;
   const near = e === p.element ? "You're pointing at" : "The nearest thing I can read is";

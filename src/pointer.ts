@@ -95,7 +95,11 @@ export function describeElement(e: PointedElement | undefined): string {
 }
 
 const LOOKING = /\b(what am i (looking at|seeing)|what'?s on (my|the) screen|what is on (my|the) screen|describe (what (i'?m|i am) (looking at|seeing)|(my|the) screen|this|it|the (page|window|picture|image|photo))|explain (this|my screen|what (i'?m|i am) looking at)|summari[sz]e (this|my screen|the page|this page)|read (this|my screen|the screen) (out|aloud|to me))\b/;
-const DRAW = /\b(circle|draw (a |an )?(circle|box|ring|arrow|line|outline)|draw around|highlight|underline|point (to|at|out)|mark|put a box)\b/;
+// A request to draw starts with the drawing word ("circle the zebra", "can you draw a circle around the buffalo"), so
+// "the next Circle line train" or "a highlight reel" stay tasks.
+const DRAW = /^(?:(?:please|can you|could you|would you|will you|now|also|and)\s+)*(?:circle|draw|highlight|underline|outline|box|mark|point (?:to|at|out)|put an? (?:box|circle|ring|arrow|mark))\b/;
+// Drawing words that name a task in an app or on mail, not a mark on the screen.
+const DRAW_TASK = /\b(?:in|using|with) (?:paint|word|powerpoint|excel|photoshop|notepad)\b|\bas (?:read|unread|done|complete|spam)\b|\b(?:e-?mails?|inbox|messages?)\b/;
 
 /**
  * Any question about the screen: pointing ("what is this?"), looking ("what am I looking at?", "describe my screen"),
@@ -104,8 +108,8 @@ const DRAW = /\b(circle|draw (a |an )?(circle|box|ring|arrow|line|outline)|draw 
 export function isScreenQuestion(text: string): boolean {
   const t = text.toLowerCase().trim();
   if (/^(open|go to|search|look up|book|type|calculate|convert|move|copy|organi[sz]e|find out|send|email|play)\b/.test(t)) return false;
-  if (DRAW.test(t) && /\b(in|using|with) (paint|word|powerpoint|excel|photoshop|notepad)\b/.test(t)) return false;   // a task in an app
-  return isPointerQuestion(text) || LOOKING.test(t) || DRAW.test(t);
+  const draw = DRAW.test(t) && !DRAW_TASK.test(t);
+  return isPointerQuestion(text) || LOOKING.test(t) || draw;
 }
 
 /** Is this utterance a question about what the user is pointing at (rather than a task to do)? */

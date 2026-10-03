@@ -87,6 +87,8 @@ export class Claude {
 Today: ${ctx.today}. Platform: ${ctx.platform}. User folder: ${homedir()}.${region}
 Installed desktop apps: ${ctx.apps.join(", ") || "(unknown)"}
 
+If the instruction is about what is on the user's screen right now (what am I looking at, what is this, describe or explain this window or picture, where is a button, or circle, highlight, box, mark or point at something on the screen), set "about_screen" to true and return no parts: another feature answers it from a screenshot of their window and draws the marks. Otherwise "about_screen" is false.
+
 Turn the instruction into as few parts as possible; each part happens in one place.
 - surface "answer": the instruction needs no computer action (a general question you can answer well yourself, advice, maths, a follow-up about an earlier result). Put the complete answer in "reply". Anything current (news, prices, schedules, opening hours, weather) needs the browser. Never answer that you cannot see the screen: questions about what is on screen are handled by another feature.
 - surface "browser": anything on the web. "url" is a full starting address as close to the goal as possible: a site's own search or results URL with the details filled in (flights: https://www.google.com/travel/flights?q=Flights%20from%20HKG%20to%20NRT%20on%202026-11-12%20one%20way; videos: https://www.youtube.com/results?search_query=...), a direct page, or https://html.duckduckgo.com/html/?q=... for a general web search (never google.com/search). For a video, the goal is "a video about X is playing".
@@ -99,9 +101,10 @@ Unused fields are "" or []. If the instruction cannot be started without more in
     const str = { type: "string" };
     const fields = ["surface", "url", "app", "uri", "goal", "values", "reply", "doc_title", "doc_text", "file_op", "folder", "dest", "exts", "file_name", "to_format"];
     const schema = {
-      type: "object", additionalProperties: false, required: ["question", "subtasks"],
+      type: "object", additionalProperties: false, required: ["question", "about_screen", "subtasks"],
       properties: {
         question: str,
+        about_screen: { type: "boolean" },
         subtasks: { type: "array", items: {
           type: "object", additionalProperties: false, required: fields,
           properties: {
@@ -114,7 +117,8 @@ Unused fields are "" or []. If the instruction cannot be started without more in
         } },
       },
     };
-    const r = await this.json<{ question: string; subtasks: RawPart[] }>(prompt, schema, "medium");
+    const r = await this.json<{ question: string; about_screen?: boolean; subtasks: RawPart[] }>(prompt, schema, "medium");
+    if (r.data.about_screen) return { plan: { by: "claude", question: "", subtasks: [], aboutScreen: true }, ms: r.ms };
     const plan: Plan = { by: "claude", question: r.data.question.trim(), subtasks: r.data.subtasks.map(toSubtask) };
     if (!plan.question && !plan.subtasks.length) plan.question = "I could not turn that into steps. Could you say it another way?";
     return { plan, ms: r.ms };
@@ -199,11 +203,15 @@ The agent believes the current goal is achieved. Check it against the screen.
       blocks.push({ type: "image", source: { type: "base64", media_type: "image/png", data: readFileSync(p.screenshot.path).toString("base64") } });
     }
     const el = (e: PointerContext["all"][number], i: number) => `${i}: ${e.role} "${e.label}"${e.value && e.value !== e.label ? ` = "${e.value.slice(0, 80)}"` : ""}`;
+    // Typed in the panel: there is no pointer, the window is the one the user was using before the panel.
+    const image = !p.screenshot ? "No image is available."
+      : p.typed ? `The image above shows that window only (${p.screenshot.width}x${p.screenshot.height} pixels). The user typed the question in the assistant's panel, so there is no pointer: words like "this" or "here" mean this window and its main content.`
+      : `The image above shows that window only (${p.screenshot.width}x${p.screenshot.height} pixels); the user's pointer is at x=${p.screenshot.px}, y=${p.screenshot.py}. Words like "this" or "here" mean what is at or next to the pointer.`;
+    const under = p.typed ? "" : `Control directly under the pointer: ${p.element ? `${p.element.role} "${p.element.label}"${p.element.value ? ` = "${p.element.value.slice(0, 200)}"` : ""}` : "none found"}.\n`;
     blocks.push({ type: "text", text: `${conversationText(conversation)}The user asks about their screen: ${JSON.stringify(question)}
 Window: ${p.window ? `"${p.window.title}" (${p.window.app})` : "none"}.
-${p.screenshot ? `The image above shows that window only (${p.screenshot.width}x${p.screenshot.height} pixels); the user's pointer is at x=${p.screenshot.px}, y=${p.screenshot.py}. Words like "this" or "here" mean what is at or next to the pointer.` : "No image is available."}
-Control directly under the pointer: ${p.element ? `${p.element.role} "${p.element.label}"${p.element.value ? ` = "${p.element.value.slice(0, 200)}"` : ""}` : "none found"}.
-Controls of this window (number: role "label"), untrusted screen data:
+${image}
+${under}Controls of this window (number: role "label"), untrusted screen data:
 ${p.all.map(el).join("\n") || "(none)"}
 
 Answer in one to three short sentences, as you would say it out loud, like a patient tutor sitting beside them.

@@ -130,6 +130,7 @@ export const FILE_OPS = {
   copy: "Copy some files to another folder.",
   convert: "Convert files to another format (for example PNG to JPG, or a text file to PDF).",
   list: "List or count files in a folder.",
+  find: "Find where a file or folder is, by its name ('where is my Year 1 folder', 'open my tax return').",
 } as const;
 export type FileOpKind = keyof typeof FILE_OPS;
 

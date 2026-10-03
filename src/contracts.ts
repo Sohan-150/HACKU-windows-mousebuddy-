@@ -122,7 +122,10 @@ export interface Subtask {
   check?: Check;                     // code check before the part counts as done
   usePreviousAnswer?: boolean;       // the text to type is the answer of the previous part
 }
-export interface Plan { subtasks: Subtask[]; question: string; by: "claude" | "jev+rules" }
+export interface Plan {
+  subtasks: Subtask[]; question: string; by: "claude" | "jev+rules";
+  aboutScreen?: boolean;             // a question about (or a drawing on) what is on the user's screen: answered by point-and-ask
+}
 
 export type ExceptionCode =
   | "needs_info" | "plan_failed" | "low_confidence" | "stalled" | "step_limit" | "false_done"

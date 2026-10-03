@@ -49,7 +49,10 @@ export interface FilePlan { actions: FileAction[]; summary: string; answer?: str
 
 /** Dry run: what would happen. Nothing on disk changes. */
 export function planFiles(op: FileOp, home = homedir()): FilePlan {
-  const guard = (p: string) => { if (!inHome(p, home)) throw new FileOpError(`For safety I only work inside ${home}; ${p} is outside it.`); };
+  // Looking (find, list) may start at the user folder itself ("where is my Year 1 folder"); changes stay below it.
+  const readOnly = op.op === "find" || op.op === "list";
+  const isHome = (p: string) => resolve(p).toLowerCase() === resolve(home).toLowerCase();
+  const guard = (p: string) => { if (!inHome(p, home) && !(readOnly && isHome(p))) throw new FileOpError(`For safety I only work inside ${home}; ${p} is outside it.`); };
   const taken = new Set<string>();
   if (op.op === "write") {
     guard(op.path);
@@ -215,7 +218,7 @@ const FILLER = new Set(["my", "the", "a", "an", "folder", "folders", "file", "fi
 /** "Year One", "year-1", "Year_1st" all become ["year", "1"]: case, separators and number words don't matter. */
 export function nameTokens(s: string): string[] {
   return s.toLowerCase().replace(/\.[a-z0-9]{1,5}$/, "").split(/[^\p{L}\p{N}]+/u).filter(Boolean)
-    .flatMap(t => t.match(/^([a-z]+)(\d+)$/) ? [t.replace(/\d+$/, ""), t.replace(/^[a-z]+/, "")] : [t])
+    .flatMap(t => { const m = t.match(/^([a-z]+)(\d+(?:st|nd|rd|th)?)$/); return m ? [m[1], m[2]] : [t]; })
     .map(t => {
       const n = NUMBER_WORDS.indexOf(t); if (n >= 0) return String(n);
       const o = ORDINALS.indexOf(t); if (o > 0) return String(o);

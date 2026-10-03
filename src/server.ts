@@ -1,19 +1,22 @@
 // Panel server: SSE /events; tasks (typed or spoken) run one at a time; approvals; stop; past runs.
-// Voice (hold the push-to-talk key, speak, release):
-//   a question about what the pointer is on ("what is this?", "where is save?"), or with Claude a how-to question
-//   ("how do I make a pivot table?") -> answered at once from the window under the pointer, read-only;
-//   "stop" -> stops the running task; "yes"/"no" -> answers the one pending approval;
+// Voice (hold the push-to-talk keys, speak, release):
+//   a question about the screen ("what is this?", "what am I looking at?", "circle the zebra", "where is save?"), or
+//   with Claude a how-to question ("how do I make a pivot table?") -> answered at once from the window under the
+//   pointer, read-only; "stop" -> stops the running task; "yes"/"no" -> answers the one pending approval;
 //   anything else -> runs as a task (VOICE_MODE=draft puts it in the instruction box instead).
+// The same screen questions typed in the panel are answered from the window the user was using (behind the panel).
+// Answers also appear in a small bubble on the screen (Windows overlay), so nobody has to switch to the panel.
 import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { newTask, runTask, type ClaudeLike, type JevLike } from "./agent";
-import { askScreen, jevAskUsd } from "./ask";
+import { askScreen, jevAskUsd, type AskResult } from "./ask";
 import type { Claude, Turn } from "./claude";
 import type { ApprovalRequest, Driver, FileAction, HandName, LogLine, Task } from "./contracts";
 import type { VoiceEvent } from "./intake";
 import { undoMoves } from "./files";
 import { JsonlLogger, newRunId, RUNS_DIR } from "./logger";
-import { cursorNow, isPointerQuestion, isTeachQuestion, lookAt, pointAt, type PointerContext } from "./pointer";
+import { hideBubble, showBubble } from "./overlay";
+import { cursorNow, isScreenQuestion, isTeachQuestion, lookAt, lookBehindPanel, pointAt, type PointerContext } from "./pointer";
 import { speak, stopSpeaking } from "./speak";
 
 export type AppClaude = ClaudeLike & Partial<Pick<Claude, "aboutScreen">>;
@@ -28,6 +31,7 @@ type AppEvent =
 
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 const POINTER_HAND: HandName = "Blue-9";      // its own cursor colour and session, so asks never disturb a running task
+const PANEL_TITLE = /^Background Agent\b/;    // the panel's browser window (viewer/index.html <title>): never what a typed question is about
 const STOP_WORDS = /^(stop|cancel|stop it|stop that|never ?mind|abort)[.!]*$/i;
 const YES = /^(yes|yeah|yep|approve|approved|go ahead|do it|ok(ay)?|sure)\b/i, NO = /^(no|nope|deny|denied|don'?t|do not)\b/i;
 
@@ -44,6 +48,8 @@ export class App {
   voiceMode: "run" | "draft" = process.env.VOICE_MODE === "draft" ? "draft" : "run";
   private pointerDown?: Promise<Point | null>;
   private prefetch?: Promise<{ at: Point; ctx: PointerContext } | null>;
+  private listening = false;           // between key down and the transcript: voice errors then go in the bubble
+  private listenTimer?: Timer;
   private clients = new Set<(e: AppEvent) => void>();
 
   constructor(public driver: Driver, public claude: AppClaude | null, public jev: AppJev | null, public hand: HandName = "Mint-3") {}
@@ -63,14 +69,35 @@ export class App {
     this.emit({ type: "voice", voice: v });
     if (v.event === "down") {
       stopSpeaking();
+      this.listening = true;
       this.pointerDown = this.driver.caps.platform === "sim" ? Promise.resolve(null) : cursorNow().catch(() => null);
       void this.buddy();
+      // Status in the corner, away from what is being pointed at (the answer comes next to the pointer). Shown after a
+      // moment (longer than voice.py's 400 ms minimum hold), so a shortcut or a tap, which cancels, does not flash it.
+      clearTimeout(this.listenTimer);
+      this.listenTimer = setTimeout(() => showBubble("Listening… point at what you mean, then let go.", { title: "Listening", ms: 30_000 }), 450);
     } else if (v.event === "up") {
+      clearTimeout(this.listenTimer);
       // Look at the window under the pointer while the speech is being transcribed (both take ~1-3 s).
       this.prefetch = this.lookUnderPointer();
-    } else if (v.event === "transcript" && v.text.trim()) void this.onSpoken(v.text.trim());
-    else if (v.event === "error") this.notice("warn", `voice: ${v.msg}`);
-    else if (v.event === "ready") this.pushState();
+      showBubble("Thinking…", { title: "Got it", ms: 20_000 });
+    } else if (v.event === "cancel") {
+      clearTimeout(this.listenTimer);
+      this.listening = false;
+      hideBubble();
+    } else if (v.event === "transcript" && v.text.trim()) {
+      this.listening = false;
+      void this.onSpoken(v.text.trim());
+    } else if (v.event === "error") {
+      this.notice("warn", `voice: ${v.msg}`);
+      if (this.listening) showBubble(v.msg, { title: "Voice", ms: 6000 });
+      this.listening = false;
+    } else if (v.event === "ready") this.pushState();
+  }
+
+  /** Is this utterance or typed instruction a question about the screen (answered from the window, not run as a task)? */
+  isScreenAsk(text: string): boolean {
+    return isScreenQuestion(text) || (!!this.claude?.aboutScreen && isTeachQuestion(text));
   }
 
   /** While you talk, the agent's cursor glides next to your pointer (Clicky's buddy), so you know it is listening. */
@@ -98,46 +125,59 @@ export class App {
     const pre = this.prefetch;
     this.prefetch = undefined;
     const pending = [...this.approvals.values()];
-    if (STOP_WORDS.test(text)) { this.stop(); speak("Stopped."); return discard(pre); }
+    if (STOP_WORDS.test(text)) { this.stop(); speak("Stopped."); showBubble("Stopped.", { title: "Agent", ms: 2500 }); return discard(pre); }
     if (pending.length === 1 && (YES.test(text) || NO.test(text))) {
       const ok = YES.test(text);
       this.answer(pending[0].req.id, ok);
       speak(ok ? "Okay." : "Okay, I won't.");
+      showBubble(ok ? "Okay." : "Okay, I won't.", { title: "Agent", ms: 2500 });
       return discard(pre);
     }
-    if (isPointerQuestion(text) || (this.claude?.aboutScreen && isTeachQuestion(text))) {
+    if (this.isScreenAsk(text)) {
       const p = await pre;
       if (p) { await this.askAbout(text, p.at, "voice", p.ctx); return; }
       const at = await this.pointerDown;
       if (at) { await this.askAbout(text, at, "voice"); return; }
     }
     void discard(pre);
-    if (this.voiceMode === "draft") { this.draft = text; this.pushState(); return; }
+    if (this.voiceMode === "draft") {
+      this.draft = text; this.pushState();
+      showBubble(`"${text}" is in the box on the panel: press Run to do it.`, { title: "Heard", ms: 6000 });
+      return;
+    }
     this.add(text, "voice");
   }
 
-  /** Answers a question about what is under a screen point. Read-only; recorded as a finished task. */
-  async askAbout(question: string, at: Point, source: Task["source"], ctx?: PointerContext): Promise<Task> {
+  /** Answers a question about the screen: the window under `at`, or (typed, no point) the window behind the panel. */
+  askAbout(question: string, at: Point | null, source: Task["source"], ctx?: PointerContext): Promise<Task> {
+    return this.startAsk(question, at, source, ctx).done;
+  }
+
+  /** Records the question as a task at once (the panel shows it) and answers it in the background. Read-only. */
+  private startAsk(question: string, at: Point | null, source: Task["source"], ctx?: PointerContext): { task: Task; done: Promise<Task> } {
     const t = newTask(question, source);
     t.status = "running"; t.startedAt = new Date().toISOString();
     this.tasks.push(t);
     this.pushState();
+    return { task: t, done: this.answerAsk(t, at, ctx) };
+  }
+
+  private async answerAsk(t: Task, at: Point | null, ctx?: PointerContext): Promise<Task> {
     const log = new JsonlLogger(newRunId(), new Set([(l: LogLine) => this.emit(l)]));
     try {
-      if (!ctx) await this.driver.ensureSession(POINTER_HAND);
-      const claude = this.claude?.aboutScreen ? this.claude as Pick<Claude, "aboutScreen" | "usage"> : null;
-      const r = await askScreen(question, at, { hand: POINTER_HAND, claude, jev: this.jev, conversation: this.turns.slice(-5) }, ctx);
+      const r = await this.screenAnswer(t.instruction, at, ctx);
       t.status = "done";
-      t.result = { answer: r.answer, evidence: `pointer at ${at.x},${at.y}${r.window ? ` in "${r.window}"` : ""}${r.element ? ` on ${r.element}` : ""}; answered by ${r.by}${r.pointedAt ? `; moved my cursor to ${r.pointedAt}` : ""}` };
+      t.result = { answer: r.answer, evidence: r.evidence };
       t.counts.jev = r.jevTokens ? 1 : 0; t.counts.claude = r.by === "claude" ? 1 : 0;
       t.cost = { jevUsd: jevAskUsd(r), claudeUsd: r.claudeUsd };
-      log.write({ type: "ask", runId: log.runId, t: new Date().toISOString(), taskId: t.id, question, window: r.window, element: r.element, answer: r.answer, by: r.by, pointedAt: r.pointedAt, ms: r.ms });
-      this.turns.push({ instruction: question, answer: r.answer });
+      log.write({ type: "ask", runId: log.runId, t: new Date().toISOString(), taskId: t.id, question: t.instruction, window: r.window, element: r.element, answer: r.answer, by: r.by, pointedAt: r.pointedAt, ms: r.ms });
+      this.turns.push({ instruction: t.instruction, answer: r.answer });
       speak(r.answer);
     } catch (e) {
       t.status = "failed";
       t.exception = { code: "driver_refused", reason: `could not look at the screen: ${(e as Error).message}` };
       speak("Sorry, I couldn't look at that.");
+      showBubble(`Sorry, I couldn't look at that: ${(e as Error).message}`, { title: "Agent", ms: 6000 });
     }
     t.endedAt = new Date().toISOString();
     log.write({ type: "task_end", runId: log.runId, t: t.endedAt, task: t });
@@ -145,7 +185,29 @@ export class App {
     return t;
   }
 
+  /**
+   * Looks at the window (under `at`, or behind the panel when the question was typed), answers, draws the marks, and
+   * shows the answer in the bubble: next to the pointer, or in the corner when there is no pointer or marks are drawn
+   * (so the bubble never covers them).
+   */
+  private async screenAnswer(question: string, at: Point | null, ctx?: PointerContext): Promise<AskResult & { evidence: string }> {
+    const claude = this.claude?.aboutScreen ? this.claude as Pick<Claude, "aboutScreen" | "usage"> : null;
+    if (!ctx) await this.driver.ensureSession(POINTER_HAND);
+    const p = ctx ?? (at ? await lookAt(POINTER_HAND, at, { screenshot: !!claude })
+      : await lookBehindPanel(POINTER_HAND, PANEL_TITLE, { screenshot: !!claude }));
+    const r = await askScreen(question, at ?? { x: p.x, y: p.y, t: p.t }, { hand: POINTER_HAND, claude, jev: this.jev, conversation: this.turns.slice(-5) }, p);
+    showBubble(r.answer, { at: at && !r.marked.length ? at : null, title: "Answer" });
+    const evidence = `${at ? `pointer at ${at.x},${at.y}` : "typed: the window behind the panel"}${r.window ? ` in "${r.window}"` : ""}${at && r.element ? ` on ${r.element}` : ""}; answered by ${r.by}${r.marked.length ? `; marked ${r.marked.join(", ")}` : ""}${r.pointedAt ? `; moved my cursor to ${r.pointedAt}` : ""}`;
+    return { ...r, evidence };
+  }
+
   add(instruction: string, source: Task["source"]): Task {
+    // A screen question ("what am I looking at?", "circle the zebra") is answered from the window, not planned as a task.
+    // (Typed how-to questions stay with the planner: "how do I renew my passport" needs no screenshot.)
+    if (this.driver.caps.platform !== "sim" && isScreenQuestion(instruction)) {
+      if (instruction === this.draft) this.draft = "";
+      return this.startAsk(instruction, null, source).task;
+    }
     const t = newTask(instruction, source);
     this.tasks.push(t);
     if (source === "voice" || instruction === this.draft) this.draft = "";
@@ -168,19 +230,32 @@ export class App {
     const upd = (t: Task) => { const i = this.tasks.findIndex(x => x.id === t.id); if (i >= 0) this.tasks[i] = t; };
     next.status = "planning";
     this.pushState();
+    if (next.source === "voice") showBubble(next.instruction, { title: "On it", ms: 8000 });
     try {
       const done = await runTask(next, {
         driver: this.driver, claude: this.claude, jev: this.jev, log, signal: this.abort.signal, hand: this.hand,
         approve: req => this.ask(req),
         onStatus: text => this.emit({ type: "status", text }),
         conversation: this.turns.slice(-5),
+        // A plan that turns out to be about the screen: a spoken one is about where the pointer is now, a typed one
+        // about the window behind the panel. The answer is shown (bubble, marks) here; the task records it.
+        askScreen: this.driver.caps.platform === "sim" ? undefined : async question => {
+          const at = next.source === "voice" ? await cursorNow().catch(() => null) : null;
+          const r = await this.screenAnswer(question, at);
+          log.write({ type: "ask", runId: log.runId, t: new Date().toISOString(), taskId: next.id, question, window: r.window, element: r.element, answer: r.answer, by: r.by, pointedAt: r.pointedAt, ms: r.ms });
+          return { answer: r.answer, evidence: r.evidence, jevUsd: jevAskUsd(r), by: r.by };
+        },
       });
       upd(done);
       if (done.status === "done" && done.result) this.turns.push({ instruction: done.instruction, answer: done.result.answer });
-      if (done.source === "voice") {
-        speak(done.status === "done" ? done.result?.answer || "Done."
-          : done.exception?.code === "needs_info" ? done.exception.reason
-          : done.status === "stopped" ? "" : `I couldn't finish that. ${done.exception?.reason ?? ""}`);
+      const told = done.status === "done" ? done.result?.answer || "Done."
+        : done.exception?.code === "needs_info" ? done.exception.reason
+        : done.status === "stopped" ? "" : `I couldn't finish that. ${done.exception?.reason ?? ""}`;
+      if (done.source === "voice") speak(told);
+      // On screen for every task (a typed one may finish while the user is in another window). A screen question's
+      // answer is already in the bubble, next to what it is about.
+      if (told && !done.plan?.aboutScreen) {
+        showBubble(told, { title: done.status === "done" ? "Done" : done.exception?.code === "needs_info" ? "I need to know" : "Couldn't finish" });
       }
     } catch (e) {
       upd({ ...next, status: "failed", exception: { code: "model_error", reason: (e as Error).message } });
@@ -198,7 +273,9 @@ export class App {
       const timer = setTimeout(() => this.answer(req.id, false), APPROVAL_TIMEOUT_MS);
       this.approvals.set(req.id, { req, resolve, timer });
       this.pushState();
-      if (this.running?.source === "voice") speak(`I need your okay to ${req.action}. Hold the talk key and say yes or no, or use the panel.`);
+      const voice = this.running?.source === "voice";
+      if (voice) speak(`I need your okay to ${req.action}. Hold the talk keys and say yes or no, or use the panel.`);
+      showBubble(`${req.action}\n${req.why}\n\nApprove or deny on the panel${voice ? ", or hold the talk keys and say yes or no" : ""}.`, { title: "Needs your okay", ms: APPROVAL_TIMEOUT_MS });
       // A stop cancels the pending approval too.
       this.abort?.signal.addEventListener("abort", () => this.answer(req.id, false), { once: true });
     });
@@ -210,6 +287,7 @@ export class App {
     clearTimeout(a.timer);
     this.approvals.delete(id);
     a.resolve(ok);
+    if (!this.approvals.size) hideBubble();
     this.pushState();
     return true;
   }

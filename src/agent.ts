@@ -11,8 +11,9 @@ import { DriverError } from "./driver/cli";
 import { FileOpError, planFiles, runFiles } from "./files";
 import { createWordDocument, toParagraphs } from "./office";
 import { GATE, Jev, JEV_USD_PER_INPUT_TOKEN, type StepState } from "./jev";
+import { goalValues, isFindField, isMessageField, messageOf, SEND_INTENT } from "./values";
 import { APP_HANDS, BROWSER_HANDS, handsFor, Locks, lockName, locksFor, Stopped } from "./lanes";
-import { perceive, screenText, signature } from "./perceive";
+import { joinFragments, NEEDS_NUMBER, perceive, relevantLines, screenText, signature } from "./perceive";
 import { planWithJev, searchUrl } from "./planner";
 import { clickNeedsApproval, personalDetailsMissing, typingForbidden } from "./safety";
 
@@ -25,6 +26,7 @@ export interface AgentDeps {
   appHand?: HandName;                     // only this hand for desktop apps (default: the pool in lanes.ts)
   locks?: Locks;                          // shared by every task of the app; without it, the parts of this task share their own
   onAgent?: (a: AgentState) => void;      // each part as an agent: hand, colour, app, what it is doing, how it ended
+  onWindow?: (w: WindowRef) => void;      // the window a part works in (set per part by runParts)
   conversation?: Turn[];                  // earlier tasks this session, for follow-ups ("book the cheapest one")
   /** Answers a question about the user's screen (point-and-ask), for plans that turn out to be one. */
   askScreen?: (question: string) => Promise<{ answer: string; evidence: string; jevUsd?: number; by?: "claude" | "jev" | "code" }>;
@@ -177,7 +179,7 @@ async function runParts(task: Task, plan: Plan, deps: AgentDeps): Promise<PartOu
       agent.now = (m ? m[2] : s).replace(/^deciding$/, "deciding what to do next");
       showAgent();
     };
-    const partDeps: AgentDeps = { ...deps, onStatus: status };
+    const partDeps: AgentDeps = { ...deps, onStatus: status, onWindow: win => { agent.windowId = win.windowId; agent.pid = win.pid; showAgent(); } };
     /** the part starts: with a hand (its Cua session and colour), or as a part that needs no window */
     const started = (hand?: HandName) => {
       const who = hand ?? (surface0.kind === "document" ? "Amber-4" : surface0.kind === "files" ? "Lime-8" : "Pink-2");
@@ -383,6 +385,7 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
   deps.onStatus?.(`opening ${where}`);
   await driver.ensureSession(hand);
   let w: WindowRef = await driver.open(hand, surface);
+  deps.onWindow?.(w);
   const history: string[] = [`opened ${where}`];
   let tried: string[] = [];
   let prevSig = "", actedLast = false, idle = 0, repeats = 0, rescues = 0, falseDone = 0, reconnects = 0, refusals = 0, waits = 0;
@@ -395,6 +398,10 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
   const mediaTried = new Set<string>();
   let emptyWaits = 0, sparseWaits = 0, retriedStuck = false;
   let start: CheckStart | undefined;          // the window when the part started (for the "playing" check)
+  const searchedFor = new Set<string>();      // what the agent already searched for in the app (once each)
+  const appName = surface.kind === "app" ? surface.app : "";
+  const wants = goalValues(sub.goal, appName);  // who or what the goal asks to reach, and the texts it gives
+  const sendOk = SEND_INTENT.test(sub.goal);    // only then may a message field be filled, or Enter / Send pressed in it
 
   for (let step = 1; step <= maxSteps; step++) {
     if (signal.aborted) throw new TaskError("stopped", "stopped by you");
@@ -413,6 +420,7 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
         // Re-binding the browser keeps its page. An app window keeps its id, so it is reopened only if it is gone.
         if (w.kind === "browser") w = await driver.open(hand, { kind: "browser", url: "" });
         else if (err.code === "window_lost") w = (await driver.rebind?.(hand, w).catch(() => null)) ?? await driver.open(hand, surface);
+        deps.onWindow?.(w);
         step--; continue;
       }
       throw err;
@@ -458,6 +466,32 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
       conversation: deps.conversation,
     };
     const jevState: StepState = { ...state, screenText: screenText(obs, 2500) };
+
+    // What the goal asks to reach ("message Mohit", "open the chat with Mum") isn't on screen, but the app has a
+    // search field: search for it (what a person does) instead of clicking whatever else is there. On screen = a
+    // control whose label STARTS with it (a mention inside some message text doesn't count). (Mac version.)
+    if (w.kind === "app" && wants.targets.length) {
+      const low = (x: string) => x.toLowerCase().replace(/[^\p{L}\p{N} ]+/gu, " ").replace(/\s+/g, " ").trim();
+      const shown = (t: string) => items.some(i => !TYPEABLE.includes(i.role) && low(i.text).startsWith(low(t)));
+      const missing = wants.targets.find(t => low(t).length >= 2 && !shown(t) && !searchedFor.has(low(t)));
+      const search = missing ? items.find(i => (TYPEABLE.includes(i.role) || i.role === "pop-up") && isFindField(i.text)) : undefined;
+      if (missing && search) {
+        searchedFor.add(low(missing));
+        deps.onStatus?.(`step ${step}: searching for ${missing}`);
+        const ta = performance.now();
+        const acted: ActSpec = { tool: "type", token: search.token, text: missing };
+        const result = await driver.act(hand, w, acted);
+        task.counts.steps++; task.counts.gui++;
+        const decision: Decision = { kind: "type", item: search.i, text: missing, conf: { kind: 1, item: 1 }, gate: 1, backend: "rule", why: `"${missing}" is not on screen: searched for it`, model: "rule", inputTokens: 0, outputTokens: 0, ms: 0 };
+        log.write({ type: "step", runId: log.runId, t: now(), taskId: task.id, sub: k, step, window: { title: obs.title, url: obs.url }, items, nDropped: dropped, decision, acted, result,
+          note: `searched for "${missing}" (it was not on screen) in '${search.text}'`, ms: { observe: Math.round(tObs - t0), decide: 0, act: Math.round(performance.now() - ta), total: Math.round(performance.now() - t0) } });
+        history.push(`searched for "${missing}" in '${search.text}'${result.ok ? "" : " (refused)"}`);
+        lastTyped = { id: search.id };
+        actedLast = true;
+        await Bun.sleep(800);
+        continue;
+      }
+    }
 
     // DECIDE: jev first; on doubt, jev again with only its top candidates; then Claude if there is one
     deps.onStatus?.(`step ${step}: deciding`);
@@ -677,14 +711,24 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
     } else if (dec.kind === "press_enter") {
       const target = (lastTyped && items.find(x => x.id === lastTyped!.id)) ?? it;
       if (!target && w.kind === "browser") { note = "no field to press Enter in"; history.push(note); logStep(); actedLast = false; continue; }
+      // SAFETY: Enter in a message field sends it: only when the goal asks to send something
+      if (target && isMessageField(target.text) && !sendOk) {
+        note = `blocked: Enter in '${target.text}' would send it, and the goal does not ask to send anything`; history.push(note); logStep(); actedLast = false; continue;
+      }
       acted = { tool: "key", key: "enter", token: target?.token }; describe = `pressed Enter${target ? ` in '${target.text}'` : ""}`;
     } else if (dec.kind === "click") {
       if (!it) { note = "no control chosen"; logStep(); actedLast = false; continue; }
-      const risky = clickNeedsApproval(it);
-      if (risky && !(await ask(task, deps, `${task.id}-${k}-${step}`, `Click '${it.text}' in ${obs.title}`, risky))) {
-        note = "you declined"; logStep(); throw new TaskError("declined", `you declined: click '${it.text}'`);
+      // SAFETY: a Send button only when the goal asks to send something
+      if (/^send\b/i.test(it.text.trim()) && !sendOk) { note = "blocked: the goal does not ask to send anything"; history.push(`did not click '${it.text}': ${note}`); logStep(); actedLast = false; continue; }
+      // Two controls with the same label (a chat-list row and the chat's header title): the one in a list is the item.
+      const row = it.role !== "list item" ? items.find(x => x !== it && x.role === "list item" && x.text.trim() === it.text.trim()) : undefined;
+      const target = row ?? it;
+      if (row) note = `the list row '${row.text}', not the ${it.role} with the same name`;
+      const risky = clickNeedsApproval(target);
+      if (risky && !(await ask(task, deps, `${task.id}-${k}-${step}`, `Click '${target.text}' in ${obs.title}`, risky))) {
+        note = "you declined"; logStep(); throw new TaskError("declined", `you declined: click '${target.text}'`);
       }
-      acted = { tool: "click", token: it.token }; describe = `clicked ${it.role} '${it.text}'`;
+      acted = { tool: "click", token: target.token }; describe = `clicked ${target.role} '${target.text}'`;
     } else if (dec.kind === "type") {
       if (!it) { note = "no field chosen"; logStep(); actedLast = false; continue; }
       // A desktop app's search box is often a combo box (Spotify's "What do you want to play?"): it takes typing too.
@@ -697,6 +741,19 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
       if (dec.backend === "jev" && (!dec.valueName || (dec.conf.value ?? 0) < GATE)) {
         // With a single prepared text there is nothing to choose: jev picked the field, the text is that one.
         text = sub.values.length === 1 ? sub.values[0].text : undefined;
+      }
+      // Which value goes in THIS field is decided by what the field is for (Mac version): a search or recipient field
+      // gets who to reach, a message field what to say, and a message field is filled only when the goal asks to send.
+      const messageField = w.kind === "app" && isMessageField(it.text);
+      if (messageField && !sendOk) {
+        note = `blocked: '${it.text}' is a message field and the goal does not ask to send anything`; history.push(note); logStep(); actedLast = false; continue;
+      }
+      if (w.kind === "app" && isFindField(it.text) && wants.targets.length === 1 && dec.backend !== "claude") text = wants.targets[0];
+      if (messageField && text !== undefined && wants.targets.some(t => t.toLowerCase() === text!.trim().toLowerCase())) {
+        // the name of who to reach never goes into a message field: the message is the other value, if there is one
+        const say = messageOf(sub.goal, appName).text ?? sub.values.find(v => v.name === "message")?.text;
+        if (!say) { note = `blocked: "${text}" is who to reach, not what to say`; history.push(note); logStep(); actedLast = false; continue; }
+        text = say;
       }
       if (text === undefined) {
         if (!claude) { note = "no prepared text fits"; logStep(); throw new TaskError("needs_info", `I don't know what to type into '${it.text}'. Put the text in quotes in your instruction.`); }
@@ -755,17 +812,22 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
  *  web page when the answer is not in the first snapshot. `read` = the page was read further (tokens went stale). */
 async function jevVerify(task: Task, sub: Subtask, state: StepState, obs: Observation, w: WindowRef, deps: AgentDeps, hand: HandName) {
   const { jev, driver } = deps;
-  let d = await jev!.extra!.checkDone({ ...state, screenText: screenText(obs, 9000) }, !!sub.question);
+  // the lines that can answer it: split sentences joined, and (on a long page) the ones shaped like the answer
+  const goalText = `${task.instruction} ${sub.goal}`;
+  const answerLines = (lines: string[]) => relevantLines(joinFragments(lines), goalText, 150, 20);
+  let d = await jev!.extra!.checkDone({ ...state, screenText: answerLines(screenText(obs, 9000)) }, !!sub.question);
   let read = false;
   if (sub.question && (!d.answer || d.answerConf < GATE) && w.kind === "browser" && driver.readMore) {
     // The answer may be further down the page than one snapshot reaches: read more of it and ask again.
     deps.onStatus?.("reading more of the page");
     const more = await driver.readMore(hand, w, 4);
     task.counts.jev++; task.cost.jevUsd += d.inputTokens * JEV_USD_PER_INPUT_TOKEN;
-    d = await jev!.extra!.checkDone({ ...state, screenText: more }, true);
+    d = await jev!.extra!.checkDone({ ...state, screenText: answerLines(more) }, true);
     read = true;
   }
   task.counts.jev++; task.cost.jevUsd += d.inputTokens * JEV_USD_PER_INPUT_TOKEN;
+  // a quantity question needs a number in the answer, otherwise it is not answered yet; the title is never the answer
+  if (sub.question && d.answer && ((NEEDS_NUMBER.test(goalText) && !/\d/.test(d.answer)) || d.answer.trim() === obs.title.trim())) d = { ...d, answer: undefined, answerConf: 0 };
   const complete = d.done >= DONE_P && (!sub.question || (!!d.answer && d.answerConf >= GATE));
   return {
     complete, read, answer: d.answer ?? (complete ? `Done: ${sub.goal.replace(/\s*\([^)]*\)\s*(?=\.?$)/, "").replace(/\.$/, "")}. Now showing "${obs.title}".` : ""),

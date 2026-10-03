@@ -6,6 +6,7 @@ import type { Check, FileMatch, FileOp, Plan, Subtask } from "./contracts";
 import { nameTokens } from "./files";
 import type { Classification, FileOpKind, JevExtra, TaskType } from "./jev";
 import { isScreenQuestion } from "./pointer";
+import { messageOf } from "./values";
 
 export class PlanError extends Error {}
 
@@ -17,10 +18,10 @@ export class PlanError extends Error {}
 // "... and open Discord", ", and send ...". "Open Spotify and play Drake" stays one part (same app).
 const NEW_APP = "(?:in|on|using|with)\\s+(?:the\\s+)?(?:" + ["calculator", "notepad", "word", "excel", "powerpoint", "outlook", "teams", "paint", "file explorer",
   "chrome", "edge", "the browser", "spotify", "youtube", "discord", "whatsapp", "telegram", "slack", "zoom", "steam", "epic games", "vs ?code",
-  "visual studio code", "settings", "google maps", "google"].join("|") + ")\\b";
+  "visual studio code", "settings", "google maps", "google", "maps", "weather", "stocks", "brave", "safari", "firefox", "file explorer", "finder", "calendar", "mail"].join("|") + ")\\b";
 const NEW_JOB = "(?:open|launch|start|go to|switch to)\\b";
-const COMMA_JOB = "(?:open|launch|start|go to|switch to|play|write|type|search|find|look up|calculate|compute|send|message|text|reply|email|call|mute|unmute|join|check|book|organi[sz]e|convert|move|copy)\\b";
-const SPLIT = new RegExp(String.raw`\s*(?:,?\s*\band then\b|,?\s*\bthen\b|,?\s*\b(?:and\s+)?(?:at the same time|meanwhile|while you'?re at it)\b,?|,?\s*\band also\b,?|;\s*|[.?!]\s+(?=[A-Z])|,?\s+and\s+(?=${NEW_APP})|,?\s+and\s+(?=${NEW_JOB})|,\s*and\s+(?=${COMMA_JOB}))\s*`, "i");
+const COMMA_JOB = "(?:open|launch|start|go to|switch to|play|write|type|search|find|look up|calculate|compute|send|message|text|reply|email|call|mute|unmute|join|check|book|organi[sz]e|sort|convert|move|copy|make|create|draft|get)\\b";
+const SPLIT = new RegExp(String.raw`\s*(?:,?\s*\band then\b|,?\s*\bthen\b|,?\s*\b(?:and\s+)?(?:at the same time|meanwhile|while you'?re at it)\b,?|,?\s*\band also\b,?|;\s*|[.?!]\s+(?=[A-Z])|,?\s+and\s+(?=${NEW_APP})|,\s+(?=(?:then\s+)?${NEW_APP})|,?\s+and\s+(?=${NEW_JOB})|,\s*and\s+(?=${COMMA_JOB}))\s*`, "i");
 
 export function splitParts(instruction: string): string[] {
   return instruction
@@ -87,15 +88,18 @@ export function flightQuery(part: string): string | null {
   if (!/\bto\s+\w/i.test(part.replace(/\b(want|like|need|have|going) to\b/gi, ""))) return null;
   const q = part.replace(/[?.!]+$/, "").replace(ASK_PREFIX, "")
     .replace(/^(a |an |some |the )?(cheap(est)?|good|direct)?\s*(flights?|fly|flying|plane tickets?|air ?fares?|airline tickets?)\b/i, "")
-    .replace(/\s*\b(and|then)\b.*$/i, "").trim();
+    .replace(/\s*\b(and|then)\b.*$/i, "").replace(/^(time|times|duration|length)\s+/i, "").trim();
   return q ? `Flights ${q}` : null;
 }
 
+/** "the flight time from Hong Kong to Tokyo", "how long is the flight": the duration, not a fare */
+const FLIGHT_TIME = /\bflight (time|duration|length)\b|\bhow long (is|does) (the|a) flight\b|\bhow long (to|does it take to) fly\b/i;
+
 /** "directions from Central to the airport" / "how do I get from A to B" -> Google Maps directions. */
 export function directions(part: string): { from: string; to: string } | null {
-  if (!/\b(directions?|route|how (do|can|should) i get|how to get|get from|navigate|travel time|commute)\b/i.test(part)) return null;
-  const s = part.replace(/[?.!]+$/, "");
-  const tail = String.raw`(?:\s+(?:by|via|using|on foot|today|tomorrow|now)\b.*)?$`;
+  if (!/\b(directions?|route|how (do|can|should) i get|how to get|get from|navigate|travel time|commute|how long (?:does|will|would) it take to (?:drive|walk|get|cycle|go|travel)|how long to (?:drive|walk|get)|(?:drive|walk|cycle) from)\b/i.test(part)) return null;
+  const s = part.replace(/[?.!]+$/, "").replace(/^(?:in|on|using)\s+(?:google\s+|apple\s+)?maps,?\s*/i, "");
+  const tail = String.raw`(?:\s+(?:by|via|using|on foot|today|tomorrow|now|tonight)\b.*)?$`;
   const a = s.match(new RegExp(String.raw`\bfrom\s+(.+?)\s+to\s+(.+?)${tail}`, "i"));
   if (a) return { from: a[1].trim(), to: a[2].trim() };
   const b = s.match(new RegExp(String.raw`\bto\s+(.+?)\s+from\s+(.+?)${tail}`, "i"));
@@ -104,11 +108,38 @@ export function directions(part: string): { from: string; to: string } | null {
   return c ? { from: "", to: c[1].trim() } : null;            // the caller asks where they start from
 }
 
+/** how to travel, when the request says: Google Maps' travelmode ("by MTR" -> transit, "walk" -> walking) */
+export function travelMode(part: string): "driving" | "walking" | "transit" | "bicycling" | undefined {
+  if (/\b(transit|public transport|bus|mtr|train|subway|metro|tram|ferry)\b/i.test(part)) return "transit";
+  if (/\b(walk|walking|on foot)\b/i.test(part)) return "walking";
+  if (/\b(cycle|cycling|bike|bicycle)\b/i.test(part)) return "bicycling";
+  if (/\b(drive|driving|by car|car)\b/i.test(part)) return "driving";
+  return undefined;
+}
+
 /** "what's the weather in Hong Kong" -> wttr.in's one-line report (plain text, no ads, no JavaScript). */
 export function weatherPlace(part: string): string | null {
   if (!/\b(weather|temperature|forecast|raining|rain today|how (hot|cold|warm) is it)\b/i.test(part)) return null;
-  const place = part.replace(/[?.!]+$/, "").match(/\b(?:in|at|for)\s+([A-Za-z][\w .'-]+?)(?:\s+(?:today|tomorrow|now|right now|this week))?$/i)?.[1];
-  return place?.trim() ?? "";
+  // the LAST "in X": "in Weather check the weather in Tokyo" is Tokyo
+  const place = part.replace(/[?.!]+$/, "").match(/^.*\b(?:in|at|for)\s+([A-Za-z][\w .'-]+?)(?:\s+(?:today|tonight|tomorrow|now|right now|this week|this weekend))?$/i)?.[1]?.trim();
+  return place && !/^(the )?(weather|msn weather)( app)?$/i.test(place) ? place : "";
+}
+
+// Stocks open straight to the quote (the Mac version's stocks:// link): Google Finance, symbol:exchange.
+const TICKERS: [RegExp, string][] = [
+  [/\bapple\b/i, "AAPL:NASDAQ"], [/\bnvidia\b/i, "NVDA:NASDAQ"], [/\btesla\b/i, "TSLA:NASDAQ"], [/\bmicrosoft\b/i, "MSFT:NASDAQ"],
+  [/\b(google|alphabet)\b/i, "GOOGL:NASDAQ"], [/\bamazon\b/i, "AMZN:NASDAQ"], [/\b(meta|facebook)\b/i, "META:NASDAQ"], [/\bnetflix\b/i, "NFLX:NASDAQ"],
+  [/\btencent\b/i, "0700:HKG"], [/\balibaba\b/i, "BABA:NYSE"], [/\bhsbc\b/i, "0005:HKG"], [/\bsony\b/i, "SONY:NYSE"], [/\btoyota\b/i, "TM:NYSE"],
+  [/\bbitcoin\b/i, "BTC-USD"], [/\b(s&p|s and p)\s*500\b/i, ".INX:INDEXSP"], [/\bhang seng\b/i, "HSI:INDEXHANGSENG"],
+];
+
+/** "what's Apple's stock price", "in Stocks check Sony stock price" -> the quote page for that symbol */
+export function stockQuote(part: string): { symbol: string; url: string } | null {
+  if (!/\b(stocks?|shares?|share price|stock price|ticker|market cap|trading at)\b/i.test(part) && !/\bbitcoin\b.*\bprice\b/i.test(part)) return null;
+  const known = TICKERS.find(([re]) => re.test(part));
+  if (known) return { symbol: known[1].split(":")[0], url: `https://www.google.com/finance/quote/${known[1]}?${googleParams()}` };
+  const explicit = (part.match(/\b[A-Z]{2,5}(?:\.[A-Z]{1,2})?\b/g) ?? []).find(t => !/^(HKU|USD|HKD|MTR|AI|OK|US|UK|HK|ETA|IN|THE)$/.test(t));
+  return explicit ? { symbol: explicit, url: `https://finance.yahoo.com/quote/${encodeURIComponent(explicit)}/` } : null;
 }
 
 /** A ready browser part for the requests above, or null. */
@@ -117,18 +148,27 @@ export function assistantPart(part: string): Subtask | null {
   if (f) {
     return {
       surface: { kind: "browser", url: `https://www.google.com/travel/flights?q=${enc(f)}&${googleParams(process.env, { currency: true })}` },
-      goal: `Flight options for "${f}" are listed on screen (airline, times and price). Do not enter passenger or payment details.`,
+      goal: FLIGHT_TIME.test(part) ? `How long the flight takes for "${f}" is visible on screen (the flight duration). Do not enter passenger or payment details.`
+        : `Flight options for "${f}" are listed on screen (airline, times and price). Do not enter passenger or payment details.`,
       values: [{ name: "flight search", text: f }], question: true,
     };
   }
   const d = directions(part);
   if (d && !d.from) throw new PlanError(`Where are you starting from? Say for example "directions from Central to ${d.to}".`);
   if (d) {
+    const mode = travelMode(part);
+    const from = d.from.replace(/^the\s+/i, ""), to = d.to.replace(/^the\s+/i, "");
     return {
-      surface: { kind: "browser", url: `https://www.google.com/maps/dir/${enc(d.from)}/${enc(d.to)}/?${googleParams()}` },
-      goal: `Directions from ${d.from} to ${d.to} are shown, with the travel time of the suggested route.`,
+      surface: { kind: "browser", url: mode
+        ? `https://www.google.com/maps/dir/?api=1&origin=${enc(from)}&destination=${enc(to)}&travelmode=${mode}&${googleParams()}`
+        : `https://www.google.com/maps/dir/${enc(d.from)}/${enc(d.to)}/?${googleParams()}` },
+      goal: `Directions from ${d.from} to ${d.to}${mode ? ` (${mode === "transit" ? "by public transport" : mode === "bicycling" ? "by bike" : mode})` : ""} are shown, with the travel time of the suggested route.`,
       values: [{ name: "start", text: d.from }, { name: "destination", text: d.to }], question: true,
     };
+  }
+  const st = stockQuote(part);
+  if (st) {
+    return { surface: { kind: "browser", url: st.url }, goal: `The current stock price of ${st.symbol} is visible on screen.`, values: [], question: true };
   }
   const w = weatherPlace(part);
   if (w !== null) {
@@ -317,7 +357,13 @@ export async function planWithJev(instruction: string, jev: JevExtra, apps: stri
   const subtasks: Subtask[] = [];
   const parts = splitParts(instruction);
   const done = (plan: Plan, deferred = false) => ({ plan, tokens, ms: Math.round(performance.now() - t0), deferred });
-  for (const part of parts.slice(0, 5)) {
+  const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  for (const clause of parts.slice(0, 8)) {
+    if (subtasks.length >= 6) break;
+    // "I am flying to Tokyo tomorrow." asks for nothing: context, never a part (Mac version)
+    if (parts.length > 1 && !TASKY.test(clause) && !apps.some(a => a.length > 2 && new RegExp(`\\b${esc(a)}\\b`, "i").test(clause))) continue;
+    // "in Safari find ...", "in a new Brave window look up ...": web parts run in the agent's own browser windows
+    const part = clause.replace(BROWSER_PLACE, "");
     const c: Classification = await jev.classify(part, apps);
     tokens += c.inputTokens;
     let type: TaskType = c.typeConf >= 0.3 ? c.type : "unclear";
@@ -362,8 +408,13 @@ export async function planWithJev(instruction: string, jev: JevExtra, apps: stri
       throw e;
     }
   }
+  if (!subtasks.length) return done({ by: "jev+rules", subtasks: [], question: "What would you like me to do? Tell me the app or website and what to do there." });
   return done({ by: "jev+rules", subtasks, question: "" });
 }
+
+/** a clause that asks for something (an action or a question); anything else is context */
+export const TASKY = /\b(open|launch|start|stop|close|turn|switch|enable|disable|resume|skip|shuffle|compute|calculate|work out|clear|add|subtract|multiply|divide|write|type|draft|make|create|save|search|look up|google|find|play|pause|watch|listen|organi[sz]e|sort|tidy|move|copy|rename|put|set|send|message|text|reply|email|call|mute|unmute|join|go to|visit|show|take|check|get|tell|convert|book|list|note|remind|translate|download|install|what|how|when|where|who|which|why|is it|are there)\b|\?/i;
+const BROWSER_PLACE = /^(?:in|on|using|with)\s+(?:a\s+new\s+)?(?:safari|brave|chrome|google chrome|edge|microsoft edge|firefox|arc|opera|the browser|a browser)(?:\s+(?:window|tab))?,?\s+/i;
 
 function partPlan(type: TaskType, part: string, c: Classification, apps: string[], home: string, hasPrevious: boolean): Subtask {
   switch (type) {
@@ -410,7 +461,12 @@ function partPlan(type: TaskType, part: string, c: Classification, apps: string[
     case "open_app": {
       if (!c.app || c.appConf < 0.4) throw new PlanError("Which app should I open? Use its name as it appears in the Start menu.");
       const quoted = [...part.matchAll(/["“]([^"”]+)["”]/g)].map((m, i) => ({ name: `text ${i + 1}`, text: m[1] }));
-      return { surface: { kind: "app", app: c.app }, goal: part, values: quoted };
+      // "message Mohit hi": who to reach and what to say are separate values (the field decides which it gets)
+      const msg = messageOf(part, c.app);
+      const values = [...quoted];
+      if (msg.to && !values.some(v => v.text === msg.to)) values.push({ name: "who to reach", text: msg.to });
+      if (msg.text && !values.some(v => v.text === msg.text)) values.push({ name: "message", text: msg.text });
+      return { surface: { kind: "app", app: c.app }, goal: part, values };
     }
     case "files": {
       const op = fileOp(c.fileOp ?? "list", part, home);

@@ -11,6 +11,10 @@ import { cuaCall, cuaText, DriverError, errorOf, merge, toResult } from "./cli";
 import { browserRole, uiaRole } from "./roles";
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+/** app and window names can carry invisible direction marks ("\u200eWhatsApp"): the name the user types has none */
+export const cleanName = (s: unknown) => String(s ?? "").replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "").trim();
+/** an app's windows the agent can use, biggest first (an app's small helper windows are not its window) */
+const byArea = (a: any, b: any) => (b.bounds?.width ?? 0) * (b.bounds?.height ?? 0) - (a.bounds?.width ?? 0) * (a.bounds?.height ?? 0) || (b.z_index ?? 0) - (a.z_index ?? 0);
 const lc = (s: unknown) => String(s ?? "").toLowerCase();
 const STATE = join(import.meta.dir, "..", "..", "runs", "agent-browser.json");
 
@@ -83,6 +87,13 @@ export class WinDriver implements Driver {
   private browserPid = new Map<HandName, number>(
     existsSync(STATE) ? Object.entries(JSON.parse(readFileSync(STATE, "utf8"))) as [HandName, number][] : []);
 
+  /** every window, with invisible direction marks taken out of titles and app names */
+  private async windows(hand: HandName, args: object = {}): Promise<any[]> {
+    const ws: any[] = (await cuaCall("list_windows", { session: hand, ...args })).data?.windows ?? [];
+    for (const w of ws) { w.title = cleanName(w.title); w.app_name = cleanName(w.app_name); }
+    return ws;
+  }
+
   async ensureSession(hand: HandName): Promise<void> {
     const r = await cuaCall("start_session", { session: hand });
     const err = errorOf(r.data);
@@ -102,8 +113,7 @@ export class WinDriver implements Driver {
 
   // ---------------- browser ----------------
   private async browserWindows(hand: HandName, pid: number): Promise<any[]> {
-    const lw = await cuaCall("list_windows", { session: hand, pid });
-    const all = (lw.data?.windows ?? []).filter((w: any) => w.pid === pid && w.title && w.bounds?.height > 100);
+    const all = (await this.windows(hand, { pid })).filter((w: any) => w.pid === pid && w.title && w.bounds?.height > 100);
     // Bubbles such as "Restore pages?" are separate small windows: keep the real browser windows.
     const main = all.filter((w: any) => /(Google Chrome|Microsoft​? ?Edge|Chromium)$/.test(w.title));
     return main.length ? main : all.filter((w: any) => w.bounds.height > 300);
@@ -149,7 +159,7 @@ export class WinDriver implements Driver {
     const r = await cuaCall("list_apps", {}, 20_000);
     const names = new Map<string, string>();
     for (const a of r.data?.apps ?? []) {
-      const name = String(a.name ?? "");
+      const name = cleanName(a.name);
       if (!name || /\.exe$|!|\\/.test(name) || names.has(name.toLowerCase())) continue;
       names.set(name.toLowerCase(), name);
       // Packaged apps launch by AUMID, desktop apps by list_apps' launch path; a display name alone may not resolve.
@@ -166,15 +176,14 @@ export class WinDriver implements Driver {
   async rebind(hand: HandName, w: WindowRef): Promise<WindowRef | null> {
     if (w.kind !== "app") return null;
     const want = lc(w.app).replace(/\.exe$/, "").replace(/\b(windows|microsoft)\b/g, "").trim() || lc(w.app);
-    const wins: any[] = ((await cuaCall("list_windows", { session: hand })).data?.windows ?? [])
-      .filter((x: any) => x.title && x.bounds?.height > 100 && !x.minimized);
-    const pick = wins.filter(x => x.pid === w.pid).sort((a, b) => (b.z_index ?? 0) - (a.z_index ?? 0))[0]
-      ?? wins.filter(x => lc(x.title).includes(want) || lc(x.app_name).includes(want)).sort((a, b) => (b.z_index ?? 0) - (a.z_index ?? 0))[0];
+    const wins: any[] = (await this.windows(hand)).filter((x: any) => x.title && x.bounds?.height > 100 && !x.minimized);
+    const pick = wins.filter(x => x.pid === w.pid).sort(byArea)[0]
+      ?? wins.filter(x => lc(x.title).includes(want) || lc(x.app_name).includes(want)).sort(byArea)[0];
     return pick ? { kind: "app", pid: pick.pid, windowId: pick.window_id, app: w.app, title: pick.title } : null;
   }
 
   private async openApp(hand: HandName, app: string, uri?: string): Promise<WindowRef> {
-    const before = new Set<number>((await cuaCall("list_windows", { session: hand })).data?.windows?.map((w: any) => w.window_id) ?? []);
+    const before = new Set<number>((await this.windows(hand)).map((w: any) => w.window_id));
     if (uri) {
       // A link the app handles itself (spotify:search:..., a game launcher's launch link): opens the app, or the running
       // one, at that place.
@@ -204,18 +213,30 @@ export class WinDriver implements Driver {
     }
     // Match windows on the meaningful words of the name: "Windows Notepad" -> "notepad".
     const want = lc(app).replace(/\.exe$/, "").replace(/\b(windows|microsoft)\b/g, "").trim() || lc(app);
-    for (let i = 0; i < 20; i++) {
-      const wins: any[] = ((await cuaCall("list_windows", { session: hand })).data?.windows ?? [])
-        .filter((w: any) => w.title && w.bounds?.height > 100 && !w.minimized);
+    const named = (w: any) => lc(w.title).includes(want) || lc(w.app_name).includes(want);
+    let reopened = false, restored = false;
+    for (let i = 0; i < 40; i++) {
+      const all = (await this.windows(hand)).filter((w: any) => w.title && w.bounds?.height > 100);
+      const wins = all.filter((w: any) => !w.minimized);
       const launched = (la.data?.windows ?? []).map((w: any) => w.window_id);
       const pick = wins.find(w => launched.includes(w.window_id))
-        ?? wins.filter(w => w.pid === la.data?.pid).sort((a, b) => (b.z_index ?? 0) - (a.z_index ?? 0))[0]
-        ?? wins.filter(w => !before.has(w.window_id) && (lc(w.title).includes(want) || lc(w.app_name).includes(want)))[0]
-        ?? wins.filter(w => lc(w.title).includes(want) || lc(w.app_name).includes(want)).sort((a, b) => (b.z_index ?? 0) - (a.z_index ?? 0))[0];
+        ?? wins.filter(w => w.pid === la.data?.pid).sort(byArea)[0]
+        ?? wins.filter(w => !before.has(w.window_id) && named(w)).sort(byArea)[0]
+        ?? wins.filter(named).sort(byArea)[0];
       if (pick) return { kind: "app", pid: pick.pid, windowId: pick.window_id, app, title: pick.title };
+      // its window is minimised: show it again without taking the foreground
+      const small = all.filter(w => w.minimized && (w.pid === la.data?.pid || named(w))).sort(byArea)[0];
+      if (small && !restored && this.fast.on) { restored = true; await this.fast.restore(small.window_id).catch(() => {}); }
+      // running with no window at all (closed to the tray, like Discord, Spotify or WhatsApp): start it again from its
+      // shortcut, which shows its window (as clicking it in the Start menu would)
+      if (i === 12 && !reopened) {
+        reopened = true;
+        const lnk = findShortcut(app);
+        if (lnk) Bun.spawn(["explorer.exe", lnk], { stdout: "ignore", stderr: "ignore" });
+      }
       await sleep(400);
     }
-    throw new DriverError("window_lost", `'${app}' started but no window appeared`);
+    throw new DriverError("window_lost", `'${app}' started but no window appeared (is it hidden in the tray, or on another desktop?)`);
   }
 
   // ---------------- observe / act ----------------

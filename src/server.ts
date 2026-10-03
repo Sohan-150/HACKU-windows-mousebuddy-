@@ -343,7 +343,7 @@ export class App {
       cmd: "agents", running: this.busy,
       tasks: shown.map(a => ({
         id: a.id, name: a.name || "Agent", colour: a.colour, app: a.app, goal: cap1(a.goal), status: a.status, now: a.now,
-        answer: tidyAnswer(a.answer ?? ""), reason: a.reason ?? "", seconds: a.seconds, steps: a.steps,
+        answer: tidyAnswer(a.answer ?? ""), reason: a.reason ?? "", seconds: a.seconds, steps: a.steps, windowId: a.windowId ?? 0, pid: a.pid ?? 0,
       })),
     });
   }

@@ -5,8 +5,10 @@
 #  * Drawings over the screen: rings, boxes, circles, underlines, arrows and labels in mint, which draw themselves in and
 #    fade away (a lesson step stays until "next"). Click-through.
 #  * While agents work, each one has a widget in the bottom-right corner: its colour, its app, what it is doing now, a
-#    running clock, and its result. Every press or text insert flashes a ring in the agent's colour where it happened.
-#    The widgets can be dragged anywhere (they stay there); everything else lets clicks through.
+#    running clock, its result, and a live preview of the window it works in (PrintWindow: works for covered windows;
+#    a grid of 1-3 columns for up to 9 agents; the tray menu turns previews off). Every press or text insert flashes a
+#    ring in the agent's colour where it happened, if that app can be seen there. The widgets can be dragged anywhere
+#    (they stay there); everything else lets clicks through.
 #  * Answers are spoken: the MP3 parts the server fetched (ElevenLabs), else the Windows voice.
 #  * Keys: Esc stops the voice (press it again within 2 s to clear the drawings); Alt + Right / Left move through a
 #    lesson. They are global hotkeys registered only while they mean something, so the rest of the time they belong to
@@ -19,7 +21,8 @@
 # same space as Cua's window bounds and element frames. Exits when stdin closes.
 #   in:  hello {key} | capture {id} | listening | status {text} | idle | typebox | clear | error {text}
 #        answer {seq, say, shapes[], step?, fadeMs, audio: "follows"|"system"} | audio {seq, part, path} | speak {seq, part, say}
-#        agents {running, tasks[]} | tap {colour, x, y, w, h, pid}
+#        agents {running, tasks[{id, name, colour, app, goal, status, now, answer, reason, seconds, windowId, pid}]}
+#        tap {colour, x, y, w, h, pid}
 #   out: ready | captured {id, path, imgW, imgH, x, y, w, h, cx, cy} | ask {text, cursor} | step {go} | dismiss | stop | key {what} | quit
 $ErrorActionPreference = "Stop"
 Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Speech -TypeDefinition @"
@@ -60,6 +63,30 @@ public static class Native {
     [DllImport("user32.dll", EntryPoint = "GetWindowThreadProcessId")] public static extern uint WindowPid(IntPtr hWnd, out uint pid);
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
     [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdc, uint flags);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
+    public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
+    /** an app's biggest visible top-level window (what a person would call its window) */
+    public static IntPtr BiggestWindowOf(int pid) {
+        IntPtr best = IntPtr.Zero; long area = 0;
+        EnumProc cb = (h, l) => {
+            uint owner;
+            if (!IsWindowVisible(h) || IsIconic(h) || WindowPid(h, out owner) == 0 || owner != (uint)pid) return true;
+            RECT r;
+            if (!GetWindowRect(h, out r)) return true;
+            long a = (long)(r.Right - r.Left) * (r.Bottom - r.Top);
+            if (a > area && r.Bottom - r.Top > 100) { area = a; best = h; }
+            return true;
+        };
+        EnumWindows(cb, IntPtr.Zero);
+        GC.KeepAlive(cb);
+        return best;
+    }
     /** is a window of this process what the user sees at this point (not covered by another app's window)? */
     public static bool ShowsProcess(int x, int y, int pid) {
         var w = WindowFromPoint(new POINT(x, y));
@@ -322,15 +349,79 @@ public class Card {
     public string Id = "", Name = "", App = "", Goal = "", Status = "queued", Now = "", Answer = "", Reason = "";
     public Color Colour = Look.MINT;
     public double Seconds;
+    public long Hwnd; public int Pid;                 // the window the agent works in (for its live preview)
     public DateTime? StartedAt;                       // when this overlay first saw it running (the clock ticks between updates)
 }
 
-/** the agents' widgets, bottom right (drag them anywhere: they stay there) */
+/** live pictures of the agents' windows: PrintWindow with PW_RENDERFULLCONTENT works for covered windows too */
+public class Previews {
+    public readonly object Sync = new object();
+    readonly Dictionary<string, Bitmap> thumbs = new Dictionary<string, Bitmap>();
+    readonly Dictionary<string, DateTime> shotAt = new Dictionary<string, DateTime>();
+    readonly HashSet<string> busy = new HashSet<string>(), finalShot = new HashSet<string>();
+    public bool Changed;
+    public Bitmap Get(string id) { Bitmap b; return thumbs.TryGetValue(id, out b) ? b : null; }
+    public void Reset() { lock (Sync) { foreach (var b in thumbs.Values) b.Dispose(); thumbs.Clear(); } shotAt.Clear(); finalShot.Clear(); }
+
+    /** a fresh picture of each working agent's window about once a second, and a last one when it finishes */
+    public void Refresh(List<Card> cards, int width) {
+        var now = DateTime.Now;
+        foreach (var c in cards) {
+            if (c.Pid <= 0 && c.Hwnd == 0) continue;
+            bool finished = c.Status == "done" || c.Status == "failed";
+            if (finished && finalShot.Contains(c.Id)) continue;
+            DateTime at;
+            if (shotAt.TryGetValue(c.Id, out at) && (now - at).TotalSeconds < (finished ? 0.3 : 1.0)) continue;
+            lock (Sync) { if (busy.Contains(c.Id)) continue; busy.Add(c.Id); }
+            shotAt[c.Id] = now;
+            if (finished) finalShot.Add(c.Id);
+            string id = c.Id; long hwnd = c.Hwnd; int pid = c.Pid;
+            ThreadPool.QueueUserWorkItem(_ => {
+                Bitmap img = null;
+                try { img = Shot(hwnd, pid, width); } catch { img = null; }
+                lock (Sync) {
+                    busy.Remove(id);
+                    if (img != null) { Bitmap old; if (thumbs.TryGetValue(id, out old)) old.Dispose(); thumbs[id] = img; Changed = true; }
+                }
+            });
+        }
+    }
+
+    static Bitmap Shot(long hwnd, int pid, int maxW) {
+        IntPtr h = new IntPtr(hwnd);
+        uint owner = 0;
+        // the window the server named, if it is still that agent's; else that app's biggest visible window
+        if (h == IntPtr.Zero || !Native.IsWindow(h) || (pid > 0 && (Native.WindowPid(h, out owner) == 0 || owner != (uint)pid))) h = pid > 0 ? Native.BiggestWindowOf(pid) : IntPtr.Zero;
+        if (h == IntPtr.Zero || Native.IsIconic(h)) return null;
+        Native.RECT r;
+        if (!Native.GetWindowRect(h, out r)) return null;
+        int w = r.Right - r.Left, ht = r.Bottom - r.Top;
+        if (w < 40 || ht < 40 || maxW < 8) return null;
+        using (var full = new Bitmap(w, ht, PixelFormat.Format32bppArgb)) {
+            using (var g = Graphics.FromImage(full)) {
+                IntPtr dc = g.GetHdc();
+                bool ok;
+                try { ok = Native.PrintWindow(h, dc, 2); } finally { g.ReleaseHdc(dc); }
+                if (!ok) return null;
+            }
+            int tw = Math.Min(maxW * 2, w), th = Math.Max(1, (int)Math.Round((double)ht * tw / w));
+            var small = new Bitmap(tw, th, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(small)) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.DrawImage(full, 0, 0, tw, th); }
+            return small;
+        }
+    }
+}
+
+/** the agents' widgets, bottom right, each with a live preview of its window; a grid of 1-3 columns for up to 9 agents
+ *  (drag them anywhere: they stay there) */
 public class Dock : Layered {
     public List<Card> Cards = new List<Card>();
+    public readonly Previews Previews = new Previews();
+    public bool ShowPreviews = true;
     DateTime? hideAt;
     bool down, moved; Point downCursor, downAt; Point? placed;
-    const int W = 300, H = 70, GAP = 8;
+    const int W = 300, TEXT_H = 70, GAP = 8;
+    int columns = 1, thumbH;
     public Dock() { clickThrough = false; }
     public void Apply(Dictionary<string, object> m) {
         bool running = J.B(m, "running");
@@ -344,42 +435,59 @@ public class Dock : Layered {
             c.App = J.S(d, "app"); c.Goal = J.S(d, "goal"); c.Status = J.S(d, "status"); if (c.Status == "") c.Status = "queued";
             c.Now = J.S(d, "now"); c.Answer = J.S(d, "answer").Replace("\n", " "); c.Reason = J.S(d, "reason");
             c.Colour = Look.Hex(J.S(d, "colour"), Look.MINT); c.Seconds = J.F(d, "seconds");
+            c.Hwnd = (long)J.F(d, "windowId"); c.Pid = J.I(d, "pid", 0);
             Card prev; old.TryGetValue(c.Id, out prev);
             c.StartedAt = prev != null && prev.StartedAt.HasValue ? prev.StartedAt : (c.Status == "running" ? (DateTime?)DateTime.Now.AddSeconds(-c.Seconds) : null);
             cards.Add(c);
         }
+        if (cards.Count == 0 || !cards.Exists(c => old.ContainsKey(c.Id))) Previews.Reset();   // a new set of agents
         Cards = cards;
         if (Cards.Count == 0) { Hide(); return; }
-        hideAt = running ? (DateTime?)null : DateTime.Now.AddSeconds(15);       // results stay readable, then the widgets go
+        hideAt = running ? (DateTime?)null : DateTime.Now.AddSeconds(20);       // results stay readable, then the widgets go
+        Arrange();
         Render();
     }
-    /** 20 times a second: the clocks, the breathing dots, the fade */
+    /** 1 column for up to 3 agents, then 2, then 3; the previews shrink to fit the screen's height */
+    void Arrange() {
+        int n = Cards.Count;
+        columns = n <= 3 ? 1 : n <= 6 ? 2 : 3;
+        int rows = (n + columns - 1) / columns;
+        int room = (Screen.PrimaryScreen.WorkingArea.Height - Look.P(32) - (rows - 1) * Look.P(GAP)) / Math.Max(1, rows) - Look.P(TEXT_H) - Look.P(8);
+        thumbH = ShowPreviews ? Math.Min(Look.P(165), room) : 0;
+        if (thumbH < Look.P(60)) thumbH = 0;
+    }
+    public void SetPreviews(bool on) { ShowPreviews = on; if (Cards.Count > 0) { Arrange(); Render(); } }
+    /** 20 times a second: the clocks, the breathing dots, the fade, the previews */
     public void Tick() {
         if (Cards.Count == 0) return;
         byte opacity = 255;
         if (hideAt.HasValue) {
             double left = (hideAt.Value - DateTime.Now).TotalSeconds;
-            if (left <= 0) { Cards = new List<Card>(); hideAt = null; Hide(); return; }
+            if (left <= 0) { Cards = new List<Card>(); hideAt = null; Previews.Reset(); Hide(); return; }
             if (left < 1) opacity = (byte)(255 * left);
         }
+        if (thumbH > 0) Previews.Refresh(Cards, Look.P(W - 20));
         Render(opacity);
     }
     void Render() { Render(255); }
     void Render(byte opacity) {
-        int w = Look.P(W), h = Look.P(H), gap = Look.P(GAP);
-        int total = Cards.Count * (h + gap) - gap;
+        int w = Look.P(W), textH = Look.P(TEXT_H), gap = Look.P(GAP);
+        int cardH = textH + (thumbH > 0 ? thumbH + Look.P(8) : 0);
+        int rows = (Cards.Count + columns - 1) / columns;
+        int totalW = columns * w + (columns - 1) * gap, totalH = rows * cardH + (rows - 1) * gap;
         int x, y;
         if (down) { x = X0; y = Y0; }
         else if (placed.HasValue) { x = placed.Value.X; y = placed.Value.Y; }
-        else { var wa = Screen.PrimaryScreen.WorkingArea; x = wa.Right - w - Look.P(16); y = wa.Bottom - total - Look.P(16); }
+        else { var wa = Screen.PrimaryScreen.WorkingArea; x = wa.Right - totalW - Look.P(16); y = wa.Bottom - totalH - Look.P(16); }
         double t = (DateTime.Now - DateTime.Today).TotalSeconds;
-        using (var b = new Bitmap(w, Math.Max(2, total), PixelFormat.Format32bppArgb))
+        using (var b = new Bitmap(Math.Max(2, totalW), Math.Max(2, totalH), PixelFormat.Format32bppArgb))
         using (var g = Look.Begin(b))
         using (var bold = Look.Semibold(13)) using (var small = Look.Font(11.5f, FontStyle.Regular)) using (var mono = Look.Font(11.5f, FontStyle.Bold)) {
             var trim = new StringFormat(StringFormatFlags.NoWrap); trim.Trimming = StringTrimming.EllipsisCharacter;
             for (int i = 0; i < Cards.Count; i++) {
                 var c = Cards[i];
-                var r = new RectangleF(0, i * (h + gap), w, h);
+                // rows fill left to right; the grid hugs the bottom-right corner
+                var r = new RectangleF((i % columns) * (w + gap), (i / columns) * (cardH + gap), w, cardH);
                 var accent = c.Status == "failed" ? Look.CORAL : c.Colour;
                 using (var card = Look.Round(RectangleF.Inflate(r, -1, -1), Look.P(12)))
                 using (var fill = new SolidBrush(Look.INK)) using (var pen = new Pen(Look.A(accent, 0.85), Look.P(1.2f))) { g.FillPath(fill, card); g.DrawPath(pen, card); }
@@ -404,6 +512,38 @@ public class Dock : Layered {
                         : c.Now != "" ? c.Now : (running ? "working" + new string('.', (int)(t * 3) % 4) : "waiting for its turn");
                     var nowColour = c.Status == "failed" ? Look.CORAL : c.Status == "done" ? Color.White : Color.FromArgb(217, 255, 255, 255);
                     using (var nb = new SolidBrush(nowColour)) g.DrawString(now, small, nb, new RectangleF(r.X + Look.P(14), r.Y + Look.P(47), w - Look.P(28), Look.P(17)), trim);
+
+                    // the live preview of the agent's window
+                    if (thumbH > 0) {
+                        var box = new RectangleF(r.X + Look.P(10), r.Y + textH, w - Look.P(20), thumbH);
+                        using (var clip = Look.Round(box, Look.P(8))) {
+                            var state = g.Save();
+                            g.SetClip(clip);
+                            using (var shade = new SolidBrush(Color.FromArgb(115, 0, 0, 0))) g.FillRectangle(shade, box);
+                            bool drawn = false;
+                            lock (Previews.Sync) {
+                                var img = Previews.Get(c.Id);
+                                if (img != null) {
+                                    // the whole window, fitted in the box and centred
+                                    float k = Math.Min(box.Width / img.Width, box.Height / img.Height);
+                                    float iw = img.Width * k, ih = img.Height * k;
+                                    var at = new RectangleF(box.X + (box.Width - iw) / 2, box.Y + (box.Height - ih) / 2, iw, ih);
+                                    using (var ia = new ImageAttributes()) {
+                                        if (!running) { var cm = new ColorMatrix(); cm.Matrix33 = 0.85f; ia.SetColorMatrix(cm); }
+                                        g.DrawImage(img, Rectangle.Round(at), 0, 0, img.Width, img.Height, GraphicsUnit.Pixel, ia);
+                                    }
+                                    drawn = true;
+                                }
+                            }
+                            if (!drawn) {
+                                var centre = new StringFormat(); centre.Alignment = StringAlignment.Center; centre.LineAlignment = StringAlignment.Center;
+                                string msg = c.Pid <= 0 && c.Hwnd == 0 ? (c.Status == "queued" ? "waiting for its turn" : "opening the window\u2026") : "";
+                                g.DrawString(msg, small, dim, box, centre);
+                            }
+                            g.Restore(state);
+                            using (var line = new Pen(Look.A(accent, 0.35), 1)) g.DrawPath(line, clip);
+                        }
+                    }
                 }
             }
             Present(b, x, y, opacity);
@@ -606,6 +746,16 @@ public static class J {
     }
 }
 
+/** small settings that outlive a restart (HKCU\Software\Backstage) */
+public static class Settings {
+    public static bool Get(string name, bool fallback) {
+        try { using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey("Software\\Backstage")) { var v = k == null ? null : k.GetValue(name); return v == null ? fallback : Convert.ToInt32(v) != 0; } } catch { return fallback; }
+    }
+    public static void Set(string name, bool value) {
+        try { using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey("Software\\Backstage")) k.SetValue(name, value ? 1 : 0); } catch { }
+    }
+}
+
 public static class Overlay {
     static readonly object writeLock = new object();
     static readonly JavaScriptSerializer json = new JavaScriptSerializer();
@@ -662,6 +812,10 @@ public static class Overlay {
         menu.Items.Add("Ask or give a job\u2026", null, (s, e) => OpenBox());
         menu.Items.Add("Clear drawings", null, (s, e) => { Out(Msg("dismiss")); Clear(); });
         menu.Items.Add("Stop the agents", null, (s, e) => Out(Msg("stop")));
+        var previews = new ToolStripMenuItem("Show window previews in the agents' widgets"); previews.CheckOnClick = true;
+        previews.Checked = Settings.Get("previews", true); dock.SetPreviews(previews.Checked);
+        previews.CheckedChanged += (s, e) => { dock.SetPreviews(previews.Checked); Settings.Set("previews", previews.Checked); };
+        menu.Items.Add(previews);
         var hide = new ToolStripMenuItem("Hide the buddy when idle"); hide.CheckOnClick = true;
         hide.CheckedChanged += (s, e) => buddy.HiddenWhenIdle = hide.Checked;
         menu.Items.Add(hide);

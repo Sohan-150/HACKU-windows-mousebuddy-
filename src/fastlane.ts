@@ -77,7 +77,7 @@ export class FastLane {
     if (first) hello(undefined);
   }
 
-  private request(op: "press" | "type", t: FastTarget, text?: string): Promise<FastResult> {
+  private request(op: "press" | "type" | "restore", t: FastTarget, text?: string): Promise<FastResult> {
     if (!this.on || !this.proc) return Promise.resolve({ ok: false, ms: 0, error: "fast lane off" });
     const id = this.next++;
     const msg = { id, op, pid: t.pid, hwnd: t.hwnd ?? 0, x: t.frame.x, y: t.frame.y, w: t.frame.w, h: t.frame.h, role: t.role, label: t.label ?? "", text };
@@ -95,6 +95,8 @@ export class FastLane {
   }
 
   press(t: FastTarget) { return this.request("press", t); }
+  /** shows a minimised window again without taking the foreground */
+  restore(hwnd: number) { return this.request("restore", { pid: 0, hwnd, frame: { x: 0, y: 0, w: 0, h: 0 }, role: "" }); }
   type(t: FastTarget, text: string) { return this.request("type", t, text); }
   stop() { try { this.proc?.stdin.end(); } catch { /* gone */ } }
 }

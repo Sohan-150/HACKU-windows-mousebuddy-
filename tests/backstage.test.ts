@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { ExplainAnswer, ExplainShape } from "../src/claude";
 import type { AgentState } from "../src/contracts";
 import { SimDriver } from "../src/driver/sim";
-import { Explainer, place, type Capture } from "../src/explain";
+import { Explainer, lessonWord, place, type Capture } from "../src/explain";
 import { FastLane } from "../src/fastlane";
 import { findShortcut } from "../src/driver/win";
 import type { ScreenControl } from "../src/pointer";
@@ -51,6 +51,11 @@ describe("router: one hotkey, a job for the agents or a question about the scree
     expect(await to("Stop everything.", { agentsBusy: true })).toBe("stop");
     expect(await to("stop")).toBe("explain");                    // nothing running: clears the drawings
     for (const q of ["next", "go on", "repeat", "back", "ok"]) expect(await to(q, { lesson: true })).toBe("explain");
+    // "quit" / "quite" alone, or "okay next", are lesson words even when the lesson state was lost: never a job that
+    // closes an app; "quit Spotify" still is one
+    for (const q of ["quit", "Quite.", "quiet", "exit", "okay, next please", "go back"]) expect([q, await to(q)]).toEqual([q, "explain"]);
+    expect(await to("quit Spotify")).toBe("agents");
+    expect(await to("Quite.", { agentsBusy: true })).toBe("explain");
   });
 
   test("unclear: jev decides; without a sure answer a question is explained and anything else is done", async () => {
@@ -158,7 +163,7 @@ describe("explain mode: answers and lessons", () => {
     const ex = new Explainer({ claude: fakeClaude({ steps }), jev: null, send: o.send, speak: () => {}, voice: quietVoice(), capture: async () => cap(), journal: "/dev/null" });
     await ex.ask("how do I add a table?");
     const answers = () => o.sent.filter(m => m.cmd === "answer");
-    expect(answers()[0]).toMatchObject({ say: 'Click Insert. Say "next" when you\'re ready.', step: { index: 0, total: 3 }, fadeMs: 0 });
+    expect(answers()[0]).toMatchObject({ say: 'Click Insert. Say "next" when you\'re ready.', step: { index: 0, total: 3 }, fadeMs: 60_000 });
     expect(ex.inLesson).toBe(true);
     expect(ex.inCode("Next.")).toBe(true);
     expect((await ex.ask("next")).answer).toBe("Click Table.");
@@ -172,6 +177,27 @@ describe("explain mode: answers and lessons", () => {
     expect(ex.inLesson).toBe(false);
     ex.dismiss();
     expect(o.sent.at(-1)).toEqual({ cmd: "clear" });
+  });
+
+  test("lesson words with fillers and mishearings: 'okay next', 'next please', 'quite' / 'quiet' clear the drawings", async () => {
+    expect(["next", "Next.", "okay, next", "next please", "um next", "go to the next step", "what's the next step?", "nest", "done", "okay"].map(lessonWord)).toEqual(Array(10).fill("next"));
+    expect(["back", "go back", "previous step", "the last step"].map(lessonWord)).toEqual(Array(4).fill("back"));
+    expect(["repeat", "say that again", "pardon?"].map(lessonWord)).toEqual(Array(3).fill("again"));
+    expect(["quit", "Quite.", "quiet", "exit", "okay thanks", "stop", "that's enough", "I'm done", "close it", "never mind"].map(lessonWord)).toEqual(Array(10).fill("dismiss"));
+    expect(["how do I add a table", "next to the bold button what is that", "open Notepad", "quit Spotify"].map(lessonWord)).toEqual(Array(4).fill(undefined));
+
+    const o = overlay();
+    const steps = [{ say: "Click Insert.", shapes: [shape({ control: 1 })] }, { say: "Click Table.", shapes: [] }];
+    const ex = new Explainer({ claude: fakeClaude({ steps }), jev: null, send: o.send, speak: () => {}, voice: quietVoice(), capture: async () => cap(), journal: "/dev/null" });
+    await ex.ask("how do I add a table?");
+    expect((await ex.ask("Okay, next please.")).answer).toBe("Click Table.");
+    expect((await ex.ask("Quite.")).answer).toBe("Cleared.");
+    expect(o.sent.at(-1)).toEqual({ cmd: "clear" });
+    expect(ex.inLesson).toBe(false);
+    // with no lesson going on, "next" asks nothing new: it says so and clears the screen
+    const r = await ex.ask("next");
+    expect(r.answer).toBe("There's no lesson going on. Ask me how to do something.");
+    expect(o.sent.filter(m => m.cmd === "answer").at(-1)).toMatchObject({ say: r.answer, shapes: [] });
   });
 
   test("the voice: ElevenLabs audio follows the drawing as MP3 files, in order; a failed part uses the Windows voice", async () => {
@@ -282,6 +308,27 @@ describe("the server: the hotkey's words, the agents' widgets", () => {
     await app.hotkey("stop", "voice");
     expect(abort.signal.aborted).toBe(true);
     expect(o.sent.filter(m => m.cmd === "answer").at(-1).say).toBe("Stopping the agents.");
+  });
+
+  test("'thank you' / 'okay' (also what silence becomes) count only in a lesson; 'stop' while agents work also clears a lesson", async () => {
+    const o = overlay();
+    const steps = [{ say: "Click Insert.", shapes: [shape({ control: 1 })] }, { say: "Click Table.", shapes: [] }];
+    const app = new App(desktop(), fakeClaude({ steps }) as any, null, "Mint-3", { send: o.send, voice: quietVoice(), capture: async () => cap() });
+    app.onVoice({ event: "transcript", lang: "en", text: "Thank you.", ms: 5, maybe_noise: true });
+    await Bun.sleep(20);
+    expect(o.sent.at(-1)).toEqual({ cmd: "error", text: "didn't catch that: hold the keys and speak a little louder" });
+    expect(app.tasks).toHaveLength(0);
+    await app.hotkey("how do I add a table?", "voice");
+    for (let i = 0; i < 100 && !app.explainer.inLesson; i++) await Bun.sleep(10);
+    app.onVoice({ event: "transcript", lang: "en", text: "Okay.", ms: 5, maybe_noise: true });
+    for (let i = 0; i < 100 && o.sent.filter(m => m.cmd === "answer").at(-1)?.say !== "Click Table."; i++) await Bun.sleep(10);
+    expect(o.sent.filter(m => m.cmd === "answer").at(-1).say).toBe("Click Table.");
+    const abort = new AbortController();
+    app.running.set("t1", { task: {} as any, abort });
+    await app.hotkey("stop", "voice");
+    expect(abort.signal.aborted).toBe(true);
+    expect(app.explainer.inLesson).toBe(false);
+    expect(o.sent).toContainEqual({ cmd: "clear" });
   });
 
   test("explain mode hands a job it was given to the agents instead of saying it can only point", async () => {

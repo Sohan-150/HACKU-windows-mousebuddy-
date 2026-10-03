@@ -3,6 +3,7 @@
 // button do", "circle the zebra")? Ported from the Mac version, then made to lean towards doing: anything phrased as an
 // order goes to the agents, and only clear questions about the screen are explained. Clear cases are decided in code;
 // an unclear one goes to jev; with no answer from jev, a question is explained and anything else is done.
+import { lessonWord } from "./explain";
 import type { JevExtra } from "./jev";
 import { calculation, looksLikeFind } from "./planner";
 import { isScreenQuestion } from "./pointer";
@@ -19,7 +20,7 @@ const DO = new RegExp(`^(${VERBS})\\b`);
 const EXPLAIN_ORDER = /^(underline|ring|circle|highlight|point (at|to|out)|draw (a |an )?(circle|ring|box|arrow|line)|mark|annotate|label|show me (how|where|what|which)|teach me|explain|walk me through|tell me (what|how|where|why|which))\b/;
 // a question about what's on the screen, or how to do something (the user does it)
 const QUESTION = /^(how (do|can|would|should) i|how to|what('s| is| are| does| do) (this|that|these|those|it|here|the .{1,30} (on|in) (my|the) screen)|what am i (looking|seeing)|where (is|are|do|can) (the|this|that|my .{1,20} (button|menu|tab|icon|setting))|why (is|does|did|can't|won't) (this|that|it)|which (button|one|key|menu|tab)|can you see|what does .* (do|mean)|is this|are these)\b/;
-const LESSON = /^(next( step)?|continue|go on|ok|okay|done|got it|and then|then what|repeat|again|back|previous)$/;
+const LESSON = /^(next( one| step)?|nest|neck|necks|text|continue|go on|carry on|keep going|ok|okay|done|got it|yes|yeah|alright|and then|then what|what's next|repeat|again|repeat that|back|go back|previous|quit|quite|exit|end|finish|close|stop|that's enough|enough|i'm done)$/;
 const APPS = /\b(calculator|notepad|word|excel|powerpoint|outlook|teams|paint|file explorer|explorer|chrome|edge|browser|spotify|youtube|google|google maps|epic games|steam|discord|whatsapp|telegram|slack|zoom|vs ?code|visual studio code|terminal|settings|photos|camera|clock|mail|calendar|onenote|obs|vlc|netflix|instagram|twitter|x\.com|facebook|messenger|signal|skype|figma|notion|obsidian|minecraft|fortnite|roblox)\b/;
 // travel and the weather are look-ups for the agents, even phrased as "how do I get to…"
 const LOOKUP = /\b(get (to|from)|directions?|route (to|from)|flights?|fly to|weather|temperature|forecast)\b/;
@@ -36,6 +37,9 @@ export function codeRoute(text: string, ctx: { lesson: boolean; agentsBusy: bool
   const w = norm(text);
   if (STOP.test(w) && ctx.agentsBusy) return "stop";
   if (DISMISS.test(w)) return "explain"; // "clear", "never mind": clears the drawings (not a job called "clear")
+  // "next", "okay next", "quit", "quite", "go back": the lesson and its drawings, never a job ("quit" alone is not an
+  // order to close an app)
+  if (lessonWord(text)) return "explain";
   if (ctx.lesson && LESSON.test(w)) return "explain";
   const order = w.replace(POLITE, "");
   if (EXPLAIN_ORDER.test(order)) return "explain";
@@ -45,7 +49,7 @@ export function codeRoute(text: string, ctx: { lesson: boolean; agentsBusy: bool
   if (calculation(w) && /\b(calculat|comput|work out|what is|what's|times|plus|minus|divided)/.test(w)) return "agents";
   if (isScreenQuestion(text) || QUESTION.test(w)) return "explain";
   if (APPS.test(w) && !asks(text)) return "agents";   // "Spotify, Drake please", "my mic on Discord off"
-  if (ctx.lesson && w.split(" ").length <= 3) return "explain"; // short replies during a lesson
+  if (ctx.lesson && w.split(" ").length <= 4 && !DO.test(order)) return "explain"; // short replies during a lesson
   return undefined;
 }
 

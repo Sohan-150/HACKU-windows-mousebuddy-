@@ -4,9 +4,10 @@
 // Deciders: TypeSafe jev first for everything it can do; Claude (optional) for planning that rules can't do, writing
 // text nobody planned, steps jev is unsure about, and reading the result. Every task ends "done" with an answer and
 // its evidence, "partial" (some parts done, the others with their reasons), or "failed" with a coded reason.
+import { readFileSync, unlinkSync } from "node:fs";
 import { AGENT_COLOURS, type ActSpec, type ActionResult, type AgentState, type Approver, type Check, type Decision, type Driver, type ExceptionCode,
   type HandName, type Item, type Logger, type Observation, type Plan, type Subtask, type Task, type WindowRef } from "./contracts";
-import { Claude, ModelError, type Turn } from "./claude";
+import { Claude, ModelError, type LookAction, type Turn } from "./claude";
 import { DriverError } from "./driver/cli";
 import { FileOpError, planFiles, runFiles } from "./files";
 import { createWordDocument, toParagraphs } from "./office";
@@ -17,7 +18,7 @@ import { joinFragments, NEEDS_NUMBER, perceive, relevantLines, screenText, signa
 import { planWithJev, searchUrl } from "./planner";
 import { clickNeedsApproval, personalDetailsMissing, typingForbidden } from "./safety";
 
-export type ClaudeLike = Pick<Claude, "plan" | "decide" | "write" | "url" | "verify" | "usage"> & Partial<Pick<Claude, "answerFrom">>;
+export type ClaudeLike = Pick<Claude, "plan" | "decide" | "write" | "url" | "verify" | "usage"> & Partial<Pick<Claude, "answerFrom" | "look">>;
 export type JevLike = Pick<Jev, "decide"> & { extra?: Pick<Jev["extra"], "classify" | "checkDone"> & Partial<Pick<Jev["extra"], "pickControl" | "choose">> };
 
 export interface AgentDeps {
@@ -35,6 +36,8 @@ export interface AgentDeps {
 class TaskError extends Error { constructor(public code: ExceptionCode, reason: string) { super(reason); } }
 const now = () => new Date().toISOString();
 const RECONNECT = ["stale", "window_lost", "session_ended"];
+/** a window's own buttons: a window with only these in it shows nothing of its content */
+const WINDOW_CHROME = /^(minimi[sz]e|maximi[sz]e|restore( down)?|close|system( menu)?|app icon|title ?bar)?$/i;
 const TYPEABLE = ["text field", "text area"];
 const DONE_P = 0.6;                       // jev's "goal achieved" probability needed when nothing better can check
 
@@ -405,7 +408,7 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
   const facts: string[] = [];              // learned during this part; kept for every later step (history keeps 8)
   const readPages = new Set<string>(), scrolls = new Map<string, number>();
   const mediaTried = new Set<string>();
-  let emptyWaits = 0, sparseWaits = 0, retriedStuck = false;
+  let emptyWaits = 0, sparseWaits = 0, retriedStuck = false, otherTried = false, pictures = 0;
   let start: CheckStart | undefined;          // the window when the part started (for the "playing" check)
   const searchedFor = new Set<string>();      // what the agent already searched for in the app (once each)
   const appName = surface.kind === "app" ? surface.app : "";
@@ -441,14 +444,29 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
     const { items, dropped } = perceive(obs, `${task.instruction} ${sub.goal} ${sub.values.map(v => v.text).join(" ")}`, 120);
     // A page or window that is still loading shows nothing: wait for it (no model call) instead of judging an empty screen.
     // (Apps get longer: Spotify and other web-view apps can show an empty window for several seconds while starting.)
-    if (!items.length && !obs.text.length && emptyWaits < (w.kind === "app" ? 14 : 8)) {
+    // (an app window with nothing but its title bar's buttons in it shows nothing either: a web view that hasn't opened up)
+    const empty = !obs.text.length && (w.kind === "app" ? items.every(i => WINDOW_CHROME.test(i.text.trim())) : !items.length);
+    if (empty && emptyWaits < 8) {
       emptyWaits++; deps.onStatus?.(`step ${step}: waiting for the page to load`);
+      // the app may have another window that is the real one (a launcher's splash, a hidden helper window)
+      if (w.kind === "app" && emptyWaits === 3 && !otherTried && driver.otherWindow) {
+        otherTried = true;
+        const other = await driver.otherWindow(hand, w).catch(() => null);
+        if (other) { w = other; deps.onWindow?.(w); history.push(`switched to the window "${other.title}"`); }
+      }
       await Bun.sleep(700); step--; continue;
     }
-    // An app that still shows nothing after that draws its window in a way accessibility tools cannot read (some game
-    // launchers): say so now rather than wait on it.
-    if (!items.length && !obs.text.length && w.kind === "app") {
+    // An app that still shows nothing draws its window in a way accessibility tools cannot read (game launchers,
+    // custom-drawn apps): with Claude, it is operated from pictures of its window; without, say so now.
+    if (empty && w.kind === "app") {
       const name = obs.title || (surface.kind === "app" ? surface.app : "This app"), uri = surface.kind === "app" ? surface.uri : undefined;
+      if (claude?.look && driver.picture && driver.clickAt && pictures < 2) {
+        pictures++;
+        const p = await runByPicture(task, k, sub, deps, hand, w, name, history, { resumable: true });
+        if (!p.resume) return p;
+        history.push(`${name} shows its controls now: reading them again`); emptyWaits = 0;
+        step--; continue;
+      }
       throw new TaskError("needs_info", `${name} doesn't show its buttons or text to accessibility tools, so I can't see or use it.${uri ? ` I opened it with its own link (${uri}), so it may already be doing what you asked.` : ""}`);
     }
     emptyWaits = 0;
@@ -697,6 +715,14 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
         deps.onStatus?.(`step ${step}: that didn't work, trying another way`);
         continue;
       }
+      // In an app, what accessibility tools show may not be all there is (a web view's page, a custom-drawn panel):
+      // one look at a picture of the window before giving up
+      if (w.kind === "app" && claude?.look && driver.picture && driver.clickAt && pictures < 2) {
+        pictures = 2;
+        note = "about to give up: looking at a picture of the window first"; logStep();
+        history.push(`was about to stop: ${why.slice(0, 160)}`);
+        return await runByPicture(task, k, sub, deps, hand, w, obs.title || (surface.kind === "app" ? surface.app : "the app"), history);
+      }
       logStep();
       throw new TaskError("needs_info", why);
     }
@@ -845,13 +871,107 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
   throw new TaskError("step_limit", `more than ${maxSteps} steps for: ${sub.goal}`);
 }
 
+/**
+ * An app that shows nothing to accessibility tools (Epic Games Launcher, custom-drawn apps, a web view that never
+ * opens up): Claude looks at a picture of its window each step and picks one action. Clicks go to that point of the
+ * window in the background (Cua tries UI Automation there, then a posted click); when one visibly changes nothing, the
+ * rest are real clicks with the window in front for a moment. Typing always goes in with the window in front. A
+ * launcher that is updating or needs a sign-in is reported.
+ */
+export async function runByPicture(task: Task, k: number, sub: Subtask, deps: AgentDeps, hand: HandName, w: WindowRef, app: string, history: string[],
+  opts: { resumable?: boolean } = {}): Promise<{ answer: string; evidence: string; resume?: boolean }> {
+  const { driver, claude, log, signal } = deps;
+  const sendOk = SEND_INTENT.test(sub.goal);
+  let waits = 0, front = false, lastPic = "", lastActed = "";
+  for (let step = 1; step <= 16; step++) {
+    if (signal.aborted) throw new TaskError("stopped", "stopped by you");
+    const t0 = performance.now();
+    // a web view that was still starting shows its controls now: back to reading them (faster than pictures)
+    if (opts.resumable && step > 1) {
+      const obs = await driver.observe(hand, w).catch(() => null);
+      if (obs && obs.elements.filter(e => e.label && !WINDOW_CHROME.test(e.label.trim())).length >= 5) return { answer: "", evidence: "", resume: true };
+    }
+    deps.onStatus?.(`step ${step}: looking at a picture of ${app}`);
+    const pic = await driver.picture!(w).catch(() => null);
+    if (!pic) throw new TaskError("needs_info", `${app} doesn't show its buttons or text to accessibility tools, and I couldn't take a picture of its window (is it minimised?).`);
+    const tSee = performance.now();
+    // the same picture as before the last click: the click did nothing (the app drops background clicks)
+    let same = false;
+    try { const h = Bun.hash(readFileSync(pic.path)).toString(); same = lastActed === "click" && h === lastPic; lastPic = h; } catch { /* unreadable */ }
+    let d: LookAction & { ms: number };
+    try { d = await claude!.look!(sub.goal, task.instruction, app, pic.path, { w: pic.imgW, h: pic.imgH }, history); }
+    finally { try { unlinkSync(pic.path); } catch { /* gone */ } }
+    task.counts.claude++; task.counts.steps++;
+    if (!front && lastActed === "click" && (same || d.last_worked === false)) {
+      front = true;
+      history.push("that click changed nothing: clicks now go in with the window in front");
+    }
+    const decision: Decision = { kind: d.kind === "type" ? "type" : d.kind === "key" ? "press_enter" : d.kind, conf: { kind: 1 }, gate: 1, backend: "claude", why: `from a picture of the window: ${d.reason}`.slice(0, 200), model: "picture", inputTokens: 0, outputTokens: 0, ms: d.ms };
+    const logStep = (acted?: ActSpec, result?: ActionResult, note?: string) => log.write({ type: "step", runId: log.runId, t: now(), taskId: task.id, sub: k, step, window: { title: w.title }, items: [], nDropped: 0, decision, acted, result, note,
+      ms: { observe: Math.round(tSee - t0), decide: d.ms, act: Math.round(performance.now() - tSee - d.ms), total: Math.round(performance.now() - t0) } });
+    lastActed = "";
+    if (d.kind === "done") { logStep(undefined, undefined, `done: ${d.answer || d.reason}`); return { answer: d.answer || d.reason || `Done in ${app}.`, evidence: `seen in a picture of the window: ${d.reason}` }; }
+    if (d.kind === "stuck") { logStep(undefined, undefined, d.reason); throw new TaskError("needs_info", d.reason || `I can't continue in ${app}.`); }
+    if (d.kind === "wait") {
+      logStep(undefined, undefined, `waiting: ${d.reason}`);
+      if (++waits > 6) throw new TaskError("needs_info", `${app} is still busy: ${d.reason}`);
+      await Bun.sleep(1500); continue;
+    }
+    waits = 0;
+    const label = (d.label || "").trim();
+    if (d.kind === "click") {
+      // SAFETY: as in readable apps: Send only when the goal asks to send; anything irreversible is asked first
+      if (/^send\b/i.test(label) && !sendOk) { logStep(undefined, undefined, "blocked: the goal does not ask to send anything"); history.push(`did not click '${label}': the goal does not ask to send anything`); continue; }
+      const risky = clickNeedsApproval({ i: -1, id: "", role: "button", text: label, token: "" });
+      if (risky && !(await ask(task, deps, `${task.id}-${k}-p${step}`, `Click '${label}' in ${app}`, risky))) { logStep(undefined, undefined, "you declined"); throw new TaskError("declined", `you declined: click '${label}'`); }
+      deps.onStatus?.(`step ${step}: clicking '${label}'`);
+      const result = await driver.clickAt!(hand, w, d.x * pic.k, d.y * pic.k, { front });
+      task.counts.gui++;
+      logStep({ tool: "click", token: `picture:${d.x},${d.y}` }, result, `clicked '${label}' at ${d.x},${d.y} in the picture${front ? " (in front)" : ""}`);
+      history.push(`clicked '${label}'${result.ok ? "" : ` (refused: ${result.error?.code})`}`);
+      lastActed = "click";
+    } else if (d.kind === "type") {
+      const field: Item = { i: -1, id: "", role: "text field", text: label, token: "" };
+      const secret = typingForbidden(field);
+      if (secret) { logStep(undefined, undefined, secret); throw new TaskError("unsafe", secret); }
+      // SAFETY: Enter in a message box sends it: only when the goal asks to send something (and never into a field
+      // the picture gives no name for, unless it does)
+      const enter = d.enter && (sendOk || (label !== "" && !isMessageField(label)));
+      if (!driver.typeAt) { logStep(undefined, undefined, "typing from a picture is not supported here"); throw new TaskError("needs_info", `${app} shows nothing to accessibility tools, and I can't type into it from a picture.`); }
+      deps.onStatus?.(`step ${step}: typing into '${label}'`);
+      const result = await driver.typeAt(hand, w, d.x * pic.k, d.y * pic.k, d.text, enter);
+      task.counts.gui++;
+      logStep({ tool: "type", token: `picture:${d.x},${d.y}`, text: d.text }, result, `typed into '${label}'${enter ? " and pressed Enter" : ""}`);
+      history.push(`typed ${JSON.stringify(d.text.slice(0, 60))} into '${label}'${enter ? " and pressed Enter" : d.enter ? " (Enter not pressed: the goal does not ask to send anything)" : ""}${result.ok ? "" : ` (refused: ${result.error?.code})`}`);
+    } else if (d.kind === "key") {
+      const key = (["enter", "escape", "tab", "pagedown", "pageup"] as const).find(x => x === d.text.trim().toLowerCase()) ?? "escape";
+      const acted: ActSpec = { tool: "key", key };
+      const result = await driver.act(hand, w, acted);
+      task.counts.gui++;
+      logStep(acted, result);
+      history.push(`pressed ${key}${result.ok ? "" : ` (refused: ${result.error?.code})`}`);
+    } else {
+      const acted: ActSpec = { tool: "scroll", direction: d.kind === "scroll_down" ? "down" : "up" };
+      const result = await driver.act(hand, w, acted);
+      logStep(acted, result);
+      history.push(`scrolled ${acted.direction}`);
+    }
+    await Bun.sleep(900);
+  }
+  throw new TaskError("step_limit", `more than 16 steps from pictures of ${app} for: ${sub.goal}`);
+}
+
 /** "mute me on Discord", "unmute my mic", "deafen": a call's own toggle, read and pressed in code (no model) */
 export function toggleGoal(goal: string): { what: "mute" | "deafen"; on: boolean } | undefined {
-  const g = goal.toLowerCase();
-  if (/\bun-?mut(e|ed|ing)\b/.test(g)) return { what: "mute", on: false };
-  if (/\bun-?deafen(ed|ing)?\b/.test(g)) return { what: "deafen", on: false };
-  if (/\bdeafen(ed|ing)?\b/.test(g)) return { what: "deafen", on: true };
-  if (/\bmut(e|ed|ing)\b/.test(g)) return { what: "mute", on: true };
+  const g = goal.toLowerCase().replace(/[.!?]+$/, "").trim();
+  // only about the user's own mic or audio: "mute me / my mic / myself", "the microphone is muted", or the order on its
+  // own ("mute", "unmute on discord"). A message to someone called Mute ("sent to Mute") is not.
+  const about = (word: string) => new RegExp(`\\b${word}\\s+(me|myself|my\\s+(mic|microphone|audio|voice|sound)|the\\s+(mic|microphone))\\b|\\b(mic|microphone|you|i)\\b.{0,30}\\b${word}\\b|^(please\\s+)?${word}\\b(\\s+(on|in)\\s+\\w+)?$`).test(g);
+  if (/\b(send|message|text|reply|sent)\b/.test(g) && !/\b(mic|microphone)\b/.test(g)) return undefined;
+  if (about("un-?mut(e|ed|ing)")) return { what: "mute", on: false };
+  if (about("un-?deafen(ed|ing)?")) return { what: "deafen", on: false };
+  if (about("deafen(ed|ing)?")) return { what: "deafen", on: true };
+  if (about("mut(e|ed|ing)")) return { what: "mute", on: true };
   return undefined;
 }
 

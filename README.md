@@ -62,6 +62,9 @@ evidence file.
 - The fast lane acts only on the exact control the agent saw (same app, control type, name and position within 3
   pixels), never types inside web pages, and reports typing as done only when the field really changed; anything else
   goes through Cua. It never acts after it has been waiting, so a click is never done twice.
+- Agents work behind your windows. When an app ignores input sent in the background (the web page inside WhatsApp or
+  Discord, a chat row that only opens on a real click, a game launcher), its window comes to the front for a moment,
+  the click or keys go in for real (the pointer moves there and straight back), and your window goes back in front.
 - Say "stop" (or press Stop) to abort at the next step.
 
 ## Quick start: Windows
@@ -132,6 +135,10 @@ voice helpers as in [native/mac/README.md](native/mac/README.md) (Right-Option);
   into Windows, a few milliseconds each) instead of Cua's single input lane (about 0.6 s each), so agents in different
   apps really act at the same time. Anything it can't do safely goes through Cua (`FAST_INPUT=off` turns it off). The
   panel shows how many actions went each way.
+- **Any app.** What an app drops in the background is done with its window in front for a moment (above). An app that
+  shows nothing to accessibility tools (Epic Games Launcher, custom-drawn apps) is operated, with Claude, from
+  pictures of its window: it clicks, types and presses keys there, and says when a game is updating or needs a sign-in.
+  Games it knows (Fortnite, CS2, Dota 2...) start straight from their launcher's own link.
 - **Approvals** appear at the top of the panel and are said out loud; hold Ctrl+Win and say "yes" or "no", or click.
 - **The panel** (the Mac version's design): command box with examples, agent cards with each one's colour, live steps
   (who decided each one: jev or Claude, and whether it went through the fast lane), tasks with their answers and
@@ -189,8 +196,9 @@ image and PDF conversion tests need Windows (System.Drawing, Chrome or Edge).
 
 ## Honest limits
 
-- Electron apps (Slack, Discord, the Claude app) show few controls to accessibility tools, so explain mode without
-  Claude can only name the window there, and the fast lane leaves them to Cua.
+- Electron and WebView2 apps (WhatsApp, Slack, Discord, the Claude app) show few controls to accessibility tools, so
+  explain mode without Claude can only name the window there, and typing into them takes their window to the front for
+  a moment. Without Claude, an app that shows nothing at all can't be used.
 - The agent's browser is not signed in anywhere, so mail, calendars and shopping carts need you.
 - jev alone does well when the plan is clear; open-ended multi-page tasks need Claude.
 - Two browser windows and two app hands: a third web part (or third app) waits for one to be free, and two parts in

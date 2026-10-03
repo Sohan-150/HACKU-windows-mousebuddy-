@@ -98,6 +98,14 @@ export interface Driver {
   /** Browser: if a click opened another tab and it is now active, bind to it. */
   followActiveTab?(hand: HandName, w: WindowRef): Promise<WindowRef>;
   keepAlive?(hand: HandName): Promise<void>;
+  /** App: another window of the same app, when the one in use shows nothing */
+  otherWindow?(hand: HandName, w: WindowRef): Promise<WindowRef | null>;
+  /** App: a picture of the window (window-local pixel = picture pixel * k) and a click at a point of it, for apps that
+   *  show nothing to accessibility tools */
+  picture?(w: WindowRef): Promise<{ path: string; imgW: number; imgH: number; k: number } | null>;
+  clickAt?(hand: HandName, w: WindowRef, x: number, y: number, opts?: { front?: boolean }): Promise<ActionResult>;
+  /** App: the field at a point of the window's picture (window-local pixels) clicked, the text typed, Enter pressed if asked */
+  typeAt?(hand: HandName, w: WindowRef, x: number, y: number, text: string, enter?: boolean): Promise<ActionResult>;
   /** a hand is done for now: its coloured cursor is hidden until it acts again */
   release?(hand: HandName): Promise<void>;
   endAll(): Promise<void>;

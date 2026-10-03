@@ -8,7 +8,7 @@ import type { AgentState, Decision, Driver, Element, HandName, Kind, Observation
 import type { Classification, StepState, TaskType } from "../src/jev";
 import { MemoryLogger } from "../src/logger";
 import { joinFragments, NEEDS_NUMBER, relevantLines } from "../src/perceive";
-import { assistantPart, planWithJev, splitParts, stockQuote, weatherPlace } from "../src/planner";
+import { assistantPart, gameLink, planWithJev, splitParts, stockQuote, weatherPlace } from "../src/planner";
 import { brief, spokenSummary, tidyAnswer } from "../src/results";
 import { goalValues, messageOf } from "../src/values";
 import { cleanName } from "../src/driver/win";
@@ -151,6 +151,11 @@ import { perceive } from "../src/perceive";
 import { FastLane } from "../src/fastlane";
 import { App } from "../src/server";
 import type { Item } from "../src/contracts";
+import { runByPicture } from "../src/agent";
+import { WinDriver } from "../src/driver/win";
+import { rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 describe("the 4 Oct run, replayed", () => {
   const item = (i: number, role: string, text: string, state?: string): Item => ({ i, id: `${role}:${text}`, role: role as any, text, token: `t${i}`, state });
@@ -251,5 +256,150 @@ describe("the 4 Oct run, replayed", () => {
     expect(app.tasks.map(t => t.instruction)).toEqual(["Mute my mic on discord", "show me how to calculate 5 times 79 on the calculator"]);
     for (let i = 0; i < 50 && !explained.length; i++) await Bun.sleep(10);
     expect(explained).toEqual(["show me how to calculate 5 times 79 on the calculator"]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// "Ensure it can work with any app": what a background action can't do (a web view's field in WhatsApp, a chat row
+// that only opens on a click, Enter) is done with the window in front for a moment; an app that shows nothing is
+// operated from pictures, typing included.
+describe("any app: the foreground fallback and pictures", () => {
+  const W: WindowRef = { kind: "app", pid: 77, windowId: 5150, app: "WhatsApp", title: "WhatsApp" };
+  /** a stand-in for the helper: reads give a WhatsApp-like window, actions answer as the real one does for a web view */
+  const fakeLane = (calls: any[], over: Record<string, any> = {}) => ({
+    on: true, reason: "",
+    read: async () => ({ ok: true, ms: 20, seq: 4, title: "WhatsApp", elements: [
+      { i: 0, role: "ListItem", name: "Mohit", x: 100, y: 200, w: 300, h: 60 },
+      { i: 1, role: "Edit", name: "Type a message", x: 500, y: 900, w: 800, h: 40 },
+      { i: 2, role: "Button", name: "Send", x: 1310, y: 900, w: 40, h: 40, enabled: false },
+      { i: 3, role: "Text", name: "Chats", x: 100, y: 100, w: 80, h: 30 },
+    ] }),
+    pressRef: async (ref: string) => { calls.push({ op: "press", ref }); return ref.endsWith(":2") ? { ok: false, ms: 1, error: "the control is disabled" } : { ok: false, ms: 1, error: "a list row needs a click" }; },
+    typeRef: async (ref: string, text: string) => { calls.push({ op: "type", ref, text }); return { ok: false, ms: 1, error: "inside a web page: needs key events" }; },
+    frontType: async (o: any) => { calls.push({ op: "front", ...o }); return { ok: true, ms: 180, how: "focus click typed in front" }; },
+    windows: async () => ({ ok: true, ms: 2, windows: [{ window_id: 5150, pid: 77, title: "WhatsApp", app_name: "WhatsApp.Root.exe", bounds: { x: 0, y: 0, width: 1400, height: 1000 }, minimized: true }] }),
+    restore: async (hwnd: number) => { calls.push({ op: "restore", hwnd }); return { ok: true, ms: 1 }; },
+    stop() {},
+    ...over,
+  });
+  const driverWith = (lane: any) => { const d = new WinDriver(); Object.defineProperty(d, "fast", { value: lane }); return d; };
+
+  test("WhatsApp's message box (a web view): typed for real with the window in front, old text replaced; a chat row is clicked", async () => {
+    const calls: any[] = [];
+    const d = driverWith(fakeLane(calls));
+    const obs = await d.observe("Purple-1", W);
+    const tok = (label: string) => obs.elements.find(e => e.label === label)!.token!;
+    const typed = await d.act("Purple-1", W, { tool: "type", token: tok("Type a message"), text: "hi" });
+    expect(typed).toMatchObject({ ok: true, route: "foreground" });
+    expect(calls.at(-1)).toEqual({ op: "front", hwnd: 5150, ref: "5150:4:1", target: undefined, text: "hi", key: undefined, replace: true, click: { x: 900, y: 920 }, soft: false });
+    // Enter: on the field as it is (no click that would move the caret), with the window in front
+    await d.act("Purple-1", W, { tool: "key", key: "enter", token: tok("Type a message") });
+    expect(calls.at(-1)).toMatchObject({ op: "front", ref: "5150:4:1", key: "enter", soft: true, text: undefined });
+    // a chat row has no Invoke: a real click on it
+    expect(await d.act("Purple-1", W, { tool: "click", token: tok("Mohit") })).toMatchObject({ ok: true, route: "foreground" });
+    expect(calls.at(-1)).toMatchObject({ op: "front", ref: "5150:4:0", click: { x: 250, y: 230 } });
+    // a disabled button is never clicked some other way
+    const n = calls.length;
+    expect(await d.act("Purple-1", W, { tool: "click", token: tok("Send") })).toMatchObject({ ok: false, error: { code: "refused" } });
+    expect(calls.length).toBe(n + 1);
+  });
+
+  test("a stale reference is read again (not a foreground click); a minimised app window is shown again, not lost", async () => {
+    const calls: any[] = [];
+    const d = driverWith(fakeLane(calls, { pressRef: async () => ({ ok: false, ms: 1, error: "stale: the window was read again since" }) }));
+    const obs = await d.observe("Purple-1", W);
+    expect(await d.act("Purple-1", W, { tool: "click", token: obs.elements[0]!.token! })).toMatchObject({ ok: false, error: { code: "stale" } });
+    expect(calls.some(c => c.op === "front")).toBe(false);
+    const back = await d.rebind!("Purple-1", { ...W, pid: -1, windowId: -1 });
+    expect(back).toMatchObject({ windowId: 5150, pid: 77 });
+    expect(calls).toContainEqual({ op: "restore", hwnd: 5150 });
+  });
+
+  test("the helper's front_type speaks the protocol: key codes, replace, soft focus, a screen point", async () => {
+    const helper = `
+      process.stdout.write(JSON.stringify({ ready: true }) + "\\n");
+      let buf = "";
+      process.stdin.on("data", d => { buf += d; let i; while ((i = buf.indexOf("\\n")) >= 0) { const r = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
+        process.stdout.write(JSON.stringify({ id: r.id, ok: true, ms: 3, how: JSON.stringify(r) }) + "\\n"); } });`;
+    const lane = new FastLane({ spawn: () => Bun.spawn([process.execPath, "-e", helper], { stdin: "pipe", stdout: "pipe", stderr: "ignore" }) });
+    expect(await lane.whenReady()).toBe(true);
+    const sent = JSON.parse((await lane.frontType({ hwnd: 9, ref: "9:1:2", text: "héllo", key: "enter", replace: true, click: { x: 10.4, y: 20.6 } })).how!);
+    expect(sent).toMatchObject({ op: "front_type", hwnd: 9, ref: "9:1:2", text: "héllo", vk: 13, replace: true, soft: false, cx: 10, cy: 21 });
+    const esc = JSON.parse((await lane.frontType({ hwnd: 9, key: "escape", soft: true })).how!);
+    expect([esc.vk, esc.soft, esc.cx, esc.text]).toEqual([27, true, undefined, ""]);
+    const t = JSON.parse((await lane.frontType({ hwnd: 9, target: { pid: 3, hwnd: 9, frame: { x: 1, y: 2, w: 3, h: 4 }, role: "Edit", label: "Search" }, text: "x" })).how!);
+    expect(t).toMatchObject({ pid: 3, x: 1, y: 2, w: 3, h: 4, role: "Edit", label: "Search", vk: 0 });
+    lane.stop();
+  });
+
+  test("an app that shows nothing, from pictures: a click that changes nothing makes the next ones real; Enter in a message box only when asked to send", async () => {
+    const png = join(tmpdir(), `pic-${Date.now()}.png`);
+    const acts: any[] = [];
+    const driver = {
+      caps: { platform: "win32", name: "pic" },
+      picture: async () => { writeFileSync(png, "same pixels"); return { path: png, imgW: 640, imgH: 400, k: 2 }; },
+      clickAt: async (_h: any, _w: any, x: number, y: number, opts: any) => { acts.push(["click", x, y, !!opts?.front]); return { ok: true, ms: 1, cli: "" }; },
+      typeAt: async (_h: any, _w: any, x: number, y: number, text: string, enter: boolean) => { acts.push(["type", x, y, text, enter]); return { ok: true, ms: 1, cli: "" }; },
+      act: async (_h: any, _w: any, a: any) => { acts.push([a.tool, a.key ?? a.direction]); return { ok: true, ms: 1, cli: "" }; },
+    } as any;
+    const looks: any[] = [
+      { kind: "click", x: 50, y: 60, label: "Chats", text: "", enter: false, last_worked: true },
+      { kind: "click", x: 70, y: 80, label: "Mohit", text: "", enter: false, last_worked: false },
+      { kind: "type", x: 300, y: 380, label: "Type a message", text: "hi there", enter: true, last_worked: true },
+      { kind: "key", x: 0, y: 0, label: "", text: "escape", enter: false, last_worked: true },
+      { kind: "done", x: 0, y: 0, label: "", text: "", enter: false, last_worked: true, answer: "The chat with Mohit is open." },
+    ];
+    const claude = { look: async () => ({ reason: "", answer: "", ms: 1, ...looks.shift() }) } as any;
+    const task = newTask("open the chat with Mohit on WhatsApp and type hi there", "typed");
+    const sub = { surface: { kind: "app" as const, app: "WhatsApp" }, goal: "the chat with Mohit is open with 'hi there' typed", values: [] };
+    const r = await runByPicture(task, 0, sub, { driver, claude, jev: null, log: new MemoryLogger(), approve: async () => true, signal: new AbortController().signal }, "Purple-1", W, "WhatsApp", []);
+    expect(r.answer).toBe("The chat with Mohit is open.");
+    expect(acts).toEqual([
+      ["click", 100, 120, false],
+      ["click", 140, 160, true],                    // the same picture after the first click: real clicks from now on
+      ["type", 600, 760, "hi there", false],        // a message box, and the goal doesn't ask to send: no Enter
+      ["key", "escape"],
+    ]);
+    rmSync(png, { force: true });
+  });
+
+  test("pictures hand back to reading the window once its controls appear; no Enter into a field with no name", async () => {
+    const png = join(tmpdir(), `pic2-${Date.now()}.png`);
+    const acts: any[] = [];
+    let reads = 0;
+    const el = (index: number, label: string): Element => ({ index, token: `u${index}`, role: "button", label, inView: true, enabled: true });
+    const driver = {
+      caps: { platform: "win32", name: "pic" },
+      picture: async () => { writeFileSync(png, `pixels ${acts.length}`); return { path: png, imgW: 640, imgH: 400, k: 1 }; },
+      clickAt: async () => ({ ok: true, ms: 1, cli: "" }),
+      typeAt: async (_h: any, _w: any, x: number, y: number, text: string, enter: boolean) => { acts.push(["type", text, enter]); return { ok: true, ms: 1, cli: "" }; },
+      act: async () => ({ ok: true, ms: 1, cli: "" }),
+      observe: async (hand: HandName, w: WindowRef): Promise<Observation> => {
+        reads++;
+        const els = reads < 2 ? [el(0, "Minimize"), el(1, "Close")] : ["Home", "Search", "Your Library", "Play", "Next"].map((l, i) => el(i, l));
+        return { hand, t: "", window: w, title: "Spotify", elements: els, text: [], truncated: false, ms: 1 };
+      },
+    } as any;
+    const claude = { look: async () => ({ kind: "type", x: 10, y: 10, label: "", text: "drake", enter: true, last_worked: true, reason: "", answer: "", ms: 1 }) } as any;
+    const sub = { surface: { kind: "app" as const, app: "Spotify" }, goal: "music for drake is playing in Spotify", values: [] };
+    const r = await runByPicture(newTask("play drake on spotify", "typed"), 0, sub, { driver, claude, jev: null, log: new MemoryLogger(), approve: async () => true, signal: new AbortController().signal }, "Purple-1", { ...W, app: "Spotify" }, "Spotify", [], { resumable: true });
+    expect(acts).toEqual([["type", "drake", false], ["type", "drake", false]]);   // no name for the field, nothing to send: no Enter
+    expect([r.resume, reads]).toEqual([true, 2]);         // step 2 read the title bar only; step 3 read 5 controls: back to reading
+    rmSync(png, { force: true });
+  });
+});
+
+describe("games and launchers", () => {
+  test("a game starts by its launcher's own link; 'open Epic Games' before it is not a part of its own", async () => {
+    const apps = ["Epic Games Launcher", "Steam", "Discord"];
+    expect(gameLink("launch Fortnite", apps)).toEqual({ name: "Fortnite", app: "Epic Games Launcher", uri: "com.epicgames.launcher://apps/Fortnite?action=launch&silent=true" });
+    expect(gameLink("play CS2", apps)?.uri).toBe("steam://rungameid/730");
+    expect(gameLink("what is Fortnite", apps)).toBeUndefined();          // not asked to start it
+    expect(gameLink("launch Minesweeper", apps)).toBeUndefined();        // a game it doesn't know: the agent finds it
+    const jev = { classify: async (part: string): Promise<Classification> => ({ type: "open_app" as TaskType, typeConf: 0.9, app: /fortnite/i.test(part) ? "Fortnite" : "Epic Games Launcher", appConf: 0.9, fileOpConf: 0, inputTokens: 1, ms: 1 }) } as any;
+    const r = await planWithJev("Open Epic Games and launch Fortnite", jev, apps, { home: "C:\\Users\\t", defer: ["web_task", "chat", "unclear"] });
+    expect(r.plan.subtasks).toHaveLength(1);
+    expect(r.plan.subtasks[0]).toMatchObject({ surface: { kind: "app", app: "Epic Games Launcher", uri: "com.epicgames.launcher://apps/Fortnite?action=launch&silent=true" } });
+    expect(r.plan.subtasks[0]!.goal).toContain("report any update");
   });
 });

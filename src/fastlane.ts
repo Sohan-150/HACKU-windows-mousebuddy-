@@ -14,6 +14,9 @@ export interface FastResult { ok: boolean; ms: number; how?: string; error?: str
 /** one control from a fast read (UI Automation, one cached call) */
 export interface FastElement { i: number; role: string; name: string; value?: string; toggle?: "on" | "off"; selected?: boolean; expanded?: boolean; enabled?: boolean; offscreen?: boolean; x: number; y: number; w: number; h: number }
 export interface FastRead extends FastResult { seq?: number; title?: string; elements?: FastElement[] }
+export type FrontKey = "enter" | "tab" | "escape" | "backspace" | "pagedown" | "pageup";
+/** Windows virtual-key codes */
+export const VK: Record<FrontKey, number> = { enter: 0x0d, tab: 0x09, escape: 0x1b, backspace: 0x08, pagedown: 0x22, pageup: 0x21 };
 
 export class FastLane {
   private proc?: Subprocess<"pipe", "pipe", "ignore">;
@@ -87,9 +90,25 @@ export class FastLane {
 
   /** a window's controls in one cached UI Automation call (the fast way to read; Cua walks control by control) */
   read(hwnd: number, max = 1500): Promise<FastRead> { return this.send({ op: "read", hwnd, max }, 8000); }
+  /** every visible top-level window, in Cua's list_windows shape, in milliseconds (no new process) */
+  windows(): Promise<{ ok: boolean; windows?: any[]; error?: string; ms: number }> { return this.send({ op: "windows" }, 3000); }
+  /** a picture of a window for the model; a point (x, y) in it is window-local pixel (x*k, y*k) for Cua's click */
+  shot(hwnd: number, max = 1280): Promise<{ ok: boolean; path?: string; imgW?: number; imgH?: number; k?: number; sx?: number; sy?: number; error?: string; ms: number }> { return this.send({ op: "shot", hwnd, max }, 6000); }
   /** act on a control from the latest read ("hwnd:read:index"): no search */
   pressRef(ref: string) { return this.send({ op: "press", ref }); }
   typeRef(ref: string, text: string) { return this.send({ op: "type", ref, text }); }
+  /** the foreground fallback, for apps that ignore background input (web views in WebView2 / Electron apps such as
+   *  WhatsApp, custom-drawn launchers): the window comes to the front for a moment, the control is focused and the
+   *  screen point `click` clicked (soft: only if it could not be focused), SendInput types (replace: select all first) and/or presses `key`, and the user's
+   *  window goes back in front */
+  frontType(o: { hwnd: number; ref?: string; target?: FastTarget; text?: string; key?: FrontKey; replace?: boolean; click?: { x: number; y: number }; soft?: boolean }): Promise<FastResult> {
+    const t = o.target;
+    return this.send({
+      op: "front_type", hwnd: o.hwnd, ref: o.ref ?? "", text: o.text ?? "", vk: o.key ? VK[o.key] : 0, replace: !!o.replace, soft: !!o.soft,
+      ...(t ? { pid: t.pid, x: t.frame.x, y: t.frame.y, w: t.frame.w, h: t.frame.h, role: t.role, label: t.label ?? "" } : {}),
+      ...(o.click ? { cx: Math.round(o.click.x), cy: Math.round(o.click.y) } : {}),
+    }, 8000).then(j => ({ ok: !!j.ok, ms: j.ms ?? 0, how: j.how, error: j.error }));
+  }
 
   private send(body: object, timeoutMs = 6000): Promise<any> {
     if (!this.on || !this.proc) return Promise.resolve({ ok: false, ms: 0, error: "fast lane off" });

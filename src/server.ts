@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { newTask, runTask, type ClaudeLike, type JevLike } from "./agent";
 import type { Claude, Turn } from "./claude";
 import { AGENT_COLOURS, type AgentState, type ApprovalRequest, type Driver, type FileAction, type HandName, type LogLine, type Task } from "./contracts";
-import { behindPanel, Explainer, type Capture, type ExplainResult, type OverlaySend } from "./explain";
+import { behindPanel, Explainer, lessonWord, type Capture, type ExplainResult, type OverlaySend } from "./explain";
 import type { VoiceEvent } from "./intake";
 import { undoMoves } from "./files";
 import { JEV_USD_PER_INPUT_TOKEN } from "./jev";
@@ -132,7 +132,11 @@ export class App {
       if (v.reason === "tap") this.send({ cmd: "typebox" });
       else { this.explainer.discard(); this.send({ cmd: "idle" }); }
     } else if (v.event === "transcript") {
-      if (v.text.trim()) void this.onSpoken(v.text.trim());
+      const said = v.text.trim();
+      // "thank you", "okay": also what the speech model makes of silence; kept only when it means something now
+      const meant = !v.maybe_noise || (this.explainer.inLesson && !!lessonWord(said)) || (this.approvals.size > 0 && (YES.test(said) || NO.test(said)));
+      if (!meant) { this.explainer.discard(); this.send({ cmd: "error", text: "didn't catch that: hold the keys and speak a little louder" }); }
+      else if (said) void this.onSpoken(said);
       else { this.explainer.discard(); this.send({ cmd: "idle" }); }
     } else if (v.event === "error") {
       this.notice("warn", `voice: ${v.msg}`);
@@ -185,6 +189,7 @@ export class App {
     console.log(`[route] "${q.slice(0, 60)}" -> ${r.to} (${r.via}${r.confidence !== undefined ? ` ${r.confidence.toFixed(2)}` : ""}, ${r.ms} ms)`);
     if (r.to === "stop") {
       this.explainer.discard();
+      if (this.explainer.inLesson) this.explainer.dismiss();   // "stop" also ends a lesson and clears its drawings
       this.stop();
       this.explainer.say("Stopping the agents.", 4000);
       return;

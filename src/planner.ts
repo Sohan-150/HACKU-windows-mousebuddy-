@@ -409,8 +409,35 @@ export async function planWithJev(instruction: string, jev: JevExtra, apps: stri
       throw e;
     }
   }
+  // "Open Epic Games and launch Fortnite": opening the app is part of the next part in it, not a part of its own
+  const appOf = (x: Subtask) => x.surface.kind === "app" ? x.surface.app.toLowerCase() : "";
+  for (let i = subtasks.length - 1; i >= 0; i--) {
+    const x = subtasks[i];
+    if (subtasks.length > 1 && x.surface.kind === "app" && !x.surface.uri && /^(please\s+)?(open|launch|start|run|go to)\s+(the\s+)?[\w .'-]{1,40}$/i.test(x.goal.trim())
+      && subtasks.some((y, j) => j !== i && appOf(y) === appOf(x))) subtasks.splice(i, 1);
+  }
   if (!subtasks.length) return done({ by: "jev+rules", subtasks: [], question: "What would you like me to do? Tell me the app or website and what to do there." });
   return done({ by: "jev+rules", subtasks, question: "" });
+}
+
+// Games by their launcher's own link. Epic: com.epicgames.launcher://apps/<id>?action=launch&silent=true; Steam: steam://rungameid/<id>.
+const GAMES: [RegExp, string, "epic" | "steam", string][] = [
+  [/\bfortnite\b/i, "Fortnite", "epic", "Fortnite"], [/\brocket league\b/i, "Rocket League", "epic", "Sugar"],
+  [/\bcounter[- ]?strike|\bcs ?2\b|\bcsgo\b/i, "Counter-Strike 2", "steam", "730"], [/\bdota\b/i, "Dota 2", "steam", "570"],
+  [/\bapex( legends)?\b/i, "Apex Legends", "steam", "1172470"], [/\bpubg\b/i, "PUBG", "steam", "578080"], [/\brust\b/i, "Rust", "steam", "252490"],
+  [/\bgta ?(5|v)\b|\bgrand theft auto\b/i, "Grand Theft Auto V", "steam", "271590"], [/\belden ring\b/i, "Elden Ring", "steam", "1245620"],
+  [/\bbaldur'?s gate\b/i, "Baldur's Gate 3", "steam", "1086940"], [/\bcyberpunk\b/i, "Cyberpunk 2077", "steam", "1091500"],
+  [/\bmarvel rivals\b/i, "Marvel Rivals", "steam", "2767030"], [/\bterraria\b/i, "Terraria", "steam", "105600"],
+];
+
+/** "launch Fortnite", "play CS2 on Steam": the game's launcher link, or undefined for a game it doesn't know */
+export function gameLink(part: string, apps: string[]): { name: string; app: string; uri: string } | undefined {
+  if (!/\b(launch|play|start|open|run|boot up|load)\b/i.test(part)) return undefined;
+  const g = GAMES.find(([re]) => re.test(part));
+  if (!g) return undefined;
+  const [, name, store, id] = g;
+  const app = store === "epic" ? apps.find(a => /epic games/i.test(a)) ?? "Epic Games Launcher" : apps.find(a => /^steam$/i.test(a)) ?? "Steam";
+  return { name, app, uri: store === "epic" ? `com.epicgames.launcher://apps/${id}?action=launch&silent=true` : `steam://rungameid/${id}` };
 }
 
 /** a clause that asks for something (an action or a question); anything else is context */
@@ -460,6 +487,10 @@ function partPlan(type: TaskType, part: string, c: Classification, apps: string[
       };
     }
     case "open_app": {
+      // a game: its launcher's own link starts it without clicking through the launcher (which shows nothing to
+      // accessibility tools); the agent then looks at the launcher for an update or a sign-in it needs
+      const game = gameLink(part, apps);
+      if (game) return { surface: { kind: "app", app: game.app, uri: game.uri }, goal: `${game.name} is starting (report any update, download or sign-in it needs)`, values: [] };
       if (!c.app || c.appConf < 0.4) throw new PlanError("Which app should I open? Use its name as it appears in the Start menu.");
       // "play Drake on Spotify": Spotify's own search link opens the results at once; done when it plays
       const play = /spotify/i.test(c.app) ? part.match(/\b(?:play|listen to|put on)\s+(.+?)(?:\s+(?:on|in|using|with|from)\s+(?:the\s+)?spotify\b.*)?$/i)?.[1]?.replace(/^(?:some|me|music by|songs by|a song by)\s+/i, "").trim() : undefined;

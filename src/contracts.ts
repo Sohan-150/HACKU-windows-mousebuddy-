@@ -98,6 +98,8 @@ export interface Driver {
   /** Browser: if a click opened another tab and it is now active, bind to it. */
   followActiveTab?(hand: HandName, w: WindowRef): Promise<WindowRef>;
   keepAlive?(hand: HandName): Promise<void>;
+  /** a hand is done for now: its coloured cursor is hidden until it acts again */
+  release?(hand: HandName): Promise<void>;
   endAll(): Promise<void>;
   /** every press or text insert in an app, where it happened (the overlay flashes it in the hand's colour) */
   onAction?: (n: ActionNote) => void;

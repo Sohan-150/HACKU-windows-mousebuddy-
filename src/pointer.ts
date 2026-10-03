@@ -115,7 +115,8 @@ export function controlList(elements: any[][], max = 150, on?: Frame): ScreenCon
  */
 export async function screenControls(hand: HandName, cursor?: { x: number; y: number }, on?: Frame): Promise<{ controls: ScreenControl[]; app?: string; windowTitle?: string }> {
   const lw = await cuaCall("list_windows", { session: hand }, 6000);
-  const vis = visibleWindows(lw).filter((w: any) => w.title !== "Program Manager");
+  // the assistant's own panel is never what the user asks about (it may be in front): the next window is
+  const vis = visibleWindows(lw).filter((w: any) => w.title !== "Program Manager" && !/^Backstage(\s+[-\u2013\u2014]\s+|$)|^Background Agent\b/.test(w.title));
   const under = cursor ? vis.find((w: any) => contains({ x: w.bounds.x, y: w.bounds.y, w: w.bounds.width, h: w.bounds.height }, cursor.x, cursor.y)) : undefined;
   const wins = [under, vis[0]].filter((w, i, a) => w && a.findIndex(x => x?.window_id === w.window_id) === i);
   if (!wins.length) return { controls: [] };

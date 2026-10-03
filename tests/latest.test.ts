@@ -142,3 +142,114 @@ describe("messaging apps: which value goes where, and nothing is sent unless ask
     expect(app.actions.some(a => a.startsWith("type t4") || a === "click t5")).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// From the Windows run of 4 Oct: the cases that went wrong, replayed.
+import { toggleGoal, toggleState } from "../src/agent";
+import { uiaWindowState, appObservation } from "../src/driver/win";
+import { perceive } from "../src/perceive";
+import { FastLane } from "../src/fastlane";
+import { App } from "../src/server";
+import type { Item } from "../src/contracts";
+
+describe("the 4 Oct run, replayed", () => {
+  const item = (i: number, role: string, text: string, state?: string): Item => ({ i, id: `${role}:${text}`, role: role as any, text, token: `t${i}`, state });
+
+  test("Discord: mute state read in code (another person's 'Muted' tile doesn't count)", () => {
+    expect(toggleGoal("Unmute my mic on discord.")).toEqual({ what: "mute", on: false });
+    expect(toggleGoal("The microphone is unmuted in Discord (the mute button shows the mic is on)")).toEqual({ what: "mute", on: false });
+    expect(toggleGoal("The microphone is muted in Discord")).toEqual({ what: "mute", on: true });
+    expect(toggleGoal("Deafen me on Discord")).toEqual({ what: "deafen", on: true });
+    expect(toggleGoal("play Drake on Spotify")).toBeUndefined();
+    const muted = [item(84, "button", "Mute"), item(94, "button", "Unmute"), item(101, "button", "dark_ravager, Muted")];
+    expect(toggleState({ what: "mute" }, muted)).toMatchObject({ on: true, release: { text: "Unmute" } });
+    const unmuted = [item(86, "button", "Mute"), item(102, "button", "dark_ravager, Muted")];
+    expect(toggleState({ what: "mute" }, unmuted)).toMatchObject({ on: false, press: { text: "Mute" } });
+    expect(toggleState({ what: "mute" }, [item(1, "button", "Mute", "on")]).on).toBe(true);     // a switch that keeps its label
+    expect(toggleState({ what: "deafen" }, unmuted)).toEqual({});
+  });
+
+  // Discord in a call: muted, with the call's own "Unmute" button
+  class Discord implements Driver {
+    caps = { platform: "sim" as const, name: "discord" };
+    muted = true; clicks: string[] = [];
+    async ensureSession() {} async listApps() { return ["Discord"]; } async endAll() {}
+    async open(): Promise<WindowRef> { return { kind: "app", pid: 9, windowId: 90, app: "Discord", title: "hi, dark_ravager - Discord" }; }
+    async observe(hand: HandName, w: WindowRef): Promise<Observation> {
+      const el = (index: number, label: string): Element => ({ index, token: `d${index}`, role: "button", label, inView: true, enabled: true });
+      const els = [el(0, "Mute"), el(1, "dark_ravager, Muted"), ...(this.muted ? [el(2, "Unmute")] : [])];
+      return { hand, t: "", window: w, title: w.title, elements: els, text: [], truncated: false, ms: 1 };
+    }
+    async act(_h: HandName, _w: WindowRef, a: any) { this.clicks.push(a.token); if (a.token === "d2") this.muted = false; return { ok: true, ms: 1, cli: "" }; }
+  }
+
+  test("'Unmute my mic on discord': one click on Unmute, done in code, no model call", async () => {
+    const app = new Discord();
+    let modelCalls = 0;
+    const claude = { usage: { inputTokens: 0, outputTokens: 0, usd: 0 }, plan: async () => { modelCalls++; return { plan: { by: "claude", question: "", subtasks: [{ surface: { kind: "app", app: "Discord" }, goal: "The microphone is unmuted in Discord.", values: [] }] } as Plan, ms: 1 }; },
+      decide: async () => { modelCalls++; throw new Error("no"); }, write: async () => ({ text: "", ms: 0 }), url: async () => ({ url: "", ms: 0 }), verify: async () => { modelCalls++; return { complete: false, answer: "", evidence: "", ms: 0 }; } };
+    const jev = { decide: async () => { throw new Error("not needed"); }, extra: { classify: async () => ({ type: "open_app" as TaskType, typeConf: 0.9, app: "Discord", appConf: 0.9, fileOpConf: 0, inputTokens: 1, ms: 1 }), checkDone: async () => ({ done: 0, answerConf: 0, inputTokens: 0, ms: 0 }) } };
+    const t = await runTask(newTask("Unmute my mic on discord.", "voice"), { driver: app, claude: claude as any, jev: jev as any, log: new MemoryLogger(), signal: new AbortController().signal, approve: async () => true });
+    expect(app.clicks).toEqual(["d2"]);
+    expect(t.status).toBe("done");
+    expect(t.result?.answer).toBe("You're unmuted in hi, dark_ravager.");
+    expect(modelCalls).toBe(0);                                      // planned by jev + rules, pressed and checked in code
+  });
+
+  test("WhatsApp: Claude's goal wording ('The message '...' has been sent to Mohit') searches for Mohit, not the message", async () => {
+    expect(goalValues("The message 'you are crazy man it works' has been sent to Mohit in WhatsApp.", "WhatsApp").targets).toEqual(["Mohit"]);
+    expect(messageOf("Open whatsapp and message mohit you are crazy man it works", "WhatsApp")).toEqual({ to: "mohit", text: "you are crazy man it works" });
+  });
+
+  test("planning: 'play drake on spotify' is planned by jev + rules at once (Spotify's own search link); unsure goes to Claude", async () => {
+    const jevSays = (typeConf: number) => ({ classify: async () => ({ type: "open_app" as TaskType, typeConf, app: "Spotify", appConf: 0.9, fileOpConf: 0, inputTokens: 1, ms: 1 }) }) as any;
+    const sure = await planWithJev("play drake on spotify", jevSays(0.9), ["Spotify"], { home: "C:\\Users\\t", defer: ["web_task", "chat", "unclear"] });
+    expect(sure.deferred).toBe(false);
+    expect(sure.plan.subtasks[0]).toMatchObject({ surface: { kind: "app", app: "Spotify", uri: "spotify:search:drake" }, goal: "music for drake is playing in Spotify", check: { kind: "playing" } });
+    const unsure = await planWithJev("play drake on spotify", jevSays(0.5), ["Spotify"], { home: "C:\\Users\\t", defer: ["web_task", "chat", "unclear"] });
+    expect(unsure.deferred).toBe(true);
+  });
+
+  test("the fast read (one cached UI Automation call) becomes the same observation as Cua's read", () => {
+    const d = uiaWindowState({ ok: true, ms: 40, seq: 3, title: "Calculator", elements: [
+      { i: 0, role: "Text", name: "Display is 0", x: 10, y: 10, w: 200, h: 40 },
+      { i: 1, role: "Button", name: "Five", x: 10, y: 60, w: 50, h: 40 },
+      { i: 2, role: "Button", name: "Mute", toggle: "on", x: 70, y: 60, w: 50, h: 40 },
+    ] }, 4242);
+    const obs = appObservation(d, { kind: "app", pid: 1, windowId: 4242, app: "Calculator", title: "Calculator" }, "Purple-1", 40);
+    expect(obs.elements.map(e => [e.token, e.role, e.label])).toEqual([["uia:4242:3:0", "text", "Display is 0"], ["uia:4242:3:1", "button", "Five"], ["uia:4242:3:2", "button", "Mute"]]);
+    expect(obs.text).toEqual(["Display is 0"]);
+    expect(perceive(obs, "mute", 120).items.find(i => i.text === "Mute")?.state).toBe("on");
+  });
+
+  test("the helper's read and act-by-reference speak the protocol", async () => {
+    const helper = `
+      process.stdout.write(JSON.stringify({ ready: true }) + "\\n");
+      let buf = "";
+      process.stdin.on("data", d => { buf += d; let i; while ((i = buf.indexOf("\\n")) >= 0) { const r = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
+        const reply = r.op === "read" ? { id: r.id, ok: true, ms: 35, seq: 1, title: "Calc", elements: [{ i: 0, role: "Button", name: "Five", x: 1, y: 2, w: 3, h: 4 }] }
+          : r.ref === "7:1:0" ? { id: r.id, ok: true, ms: 2, how: "ref invoke" } : { id: r.id, ok: false, ms: 1, error: "stale: the window was read again since" };
+        process.stdout.write(JSON.stringify(reply) + "\\n"); } });`;
+    const lane = new FastLane({ spawn: () => Bun.spawn([process.execPath, "-e", helper], { stdin: "pipe", stdout: "pipe", stderr: "ignore" }) });
+    expect(await lane.whenReady()).toBe(true);
+    const r = await lane.read(7);
+    expect([r.ok, r.seq, r.elements?.[0]?.name]).toEqual([true, 1, "Five"]);
+    expect(await lane.pressRef("7:1:0")).toMatchObject({ ok: true, how: "ref invoke" });
+    expect((await lane.pressRef("7:0:0")).error).toContain("stale");
+    lane.stop();
+  });
+
+  test("'mute me on Discord and then show me how to calculate 5 times 79': the job runs, the 'show me how' is taught", async () => {
+    const sent: any[] = [];
+    const desktop = Object.assign(new (await import("../src/driver/sim")).SimDriver(), { caps: { platform: "win32" as const, name: "test" } });
+    const explained: string[] = [];
+    const app = new App(desktop, null, null, "Mint-3", { send: m => { sent.push(m); return true; }, voice: new (await import("../src/voice")).Voice({ key: "" }),
+      capture: async () => ({ imgW: 0, imgH: 0, screen: { x: 0, y: 0, w: 0, h: 0 }, controls: [], ms: 0, error: "test" }) });
+    const ask = app.explainer.ask.bind(app.explainer);
+    app.explainer.ask = async (text: string, ...rest: any[]) => { explained.push(text); return ask(text, ...rest); };
+    await app.hotkey("Mute my mic on discord and then show me how to calculate 5 times 79 on the calculator", "voice");
+    expect(app.tasks.map(t => t.instruction)).toEqual(["Mute my mic on discord", "show me how to calculate 5 times 79 on the calculator"]);
+    for (let i = 0; i < 50 && !explained.length; i++) await Bun.sleep(10);
+    expect(explained).toEqual(["show me how to calculate 5 times 79 on the calculator"]);
+  });
+});

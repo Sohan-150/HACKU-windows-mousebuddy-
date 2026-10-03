@@ -53,6 +53,12 @@ def load_model(name):
 
 
 LANG = None   # set from --lang; "en" by default (English dictation)
+# Words the assistant hears a lot: a hint for the speech model, so "deafen" isn't "defin" and "Drake" isn't "Dracons".
+# VOICE_WORDS in .env adds your own (names of friends, apps, songs), comma separated.
+HINT = ("Spotify, Discord, WhatsApp, YouTube, Chrome, Calculator, Notepad, Word, Excel, VS Code, Steam, Epic Games, "
+        "Drake, mute, unmute, deafen, undeafen, message")
+if os.environ.get("VOICE_WORDS"):
+    HINT += " " + os.environ["VOICE_WORDS"].replace(",", ", ").strip()
 
 
 def transcribe(model, audio):
@@ -60,14 +66,16 @@ def transcribe(model, audio):
     clips. With --lang auto: detect, and if the result is not English or Chinese/Cantonese, run again forced to the
     likelier of those."""
     t0 = time.time()
-    segs, info = model.transcribe(audio, language=LANG, beam_size=1, vad_filter=False,
+    segs, info = model.transcribe(audio, language=LANG, beam_size=1, vad_filter=False, initial_prompt=HINT,
                                   condition_on_previous_text=False, without_timestamps=True)
     text = "".join(s.text for s in segs).strip()
+    if text.strip(" .,").lower() in HINT.lower() and len(text.split()) > 3:
+        text = ""   # the hint itself came back (a near-silent clip): nothing was said
     lang = info.language
     if LANG is None and lang not in KEEP_LANGS:
         probs = dict(info.all_language_probs or [])
         lang = max(KEEP_LANGS, key=lambda l: probs.get(l, 0.0))
-        segs, _ = model.transcribe(audio, language=lang, beam_size=1, vad_filter=False,
+        segs, _ = model.transcribe(audio, language=lang, beam_size=1, vad_filter=False, initial_prompt=HINT,
                                    condition_on_previous_text=False, without_timestamps=True)
         text = "".join(s.text for s in segs).strip()
     return {"lang": lang, "text": text, "ms": round((time.time() - t0) * 1000),

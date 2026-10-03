@@ -366,7 +366,8 @@ export async function planWithJev(instruction: string, jev: JevExtra, apps: stri
     const part = clause.replace(BROWSER_PLACE, "");
     const c: Classification = await jev.classify(part, apps);
     tokens += c.inputTokens;
-    let type: TaskType = c.typeConf >= 0.3 ? c.type : "unclear";
+    // with Claude to fall back on, the rules plan only what jev is sure about; alone, they take what jev thinks likely
+    let type: TaskType = c.typeConf >= (o.defer?.length ? 0.6 : 0.3) ? c.type : "unclear";
     // A recognisable arithmetic expression is a calculation whatever the classifier said about the wording.
     const calc = calculation(part);
     if (type !== "calculate" && calc && /\b(calculat|comput|work out|what is|what's|calculator)/i.test(part)) type = "calculate";
@@ -460,6 +461,9 @@ function partPlan(type: TaskType, part: string, c: Classification, apps: string[
     }
     case "open_app": {
       if (!c.app || c.appConf < 0.4) throw new PlanError("Which app should I open? Use its name as it appears in the Start menu.");
+      // "play Drake on Spotify": Spotify's own search link opens the results at once; done when it plays
+      const play = /spotify/i.test(c.app) ? part.match(/\b(?:play|listen to|put on)\s+(.+?)(?:\s+(?:on|in|using|with|from)\s+(?:the\s+)?spotify\b.*)?$/i)?.[1]?.replace(/^(?:some|me|music by|songs by|a song by)\s+/i, "").trim() : undefined;
+      if (play) return { surface: { kind: "app", app: c.app, uri: `spotify:search:${encodeURIComponent(play)}` }, goal: `music for ${play} is playing in Spotify`, values: [{ name: "search terms", text: play }], check: { kind: "playing" } };
       const quoted = [...part.matchAll(/["“]([^"”]+)["”]/g)].map((m, i) => ({ name: `text ${i + 1}`, text: m[1] }));
       // "message Mohit hi": who to reach and what to say are separate values (the field decides which it gets)
       const msg = messageOf(part, c.app);

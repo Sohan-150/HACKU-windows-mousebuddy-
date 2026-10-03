@@ -838,7 +838,7 @@ public static class Overlay {
         voice.Tick();
         buddy.Tick();
         canvas.Tick();
-        if (frame % 3 == 0) dock.Tick();
+        if (frame % 6 == 0) dock.Tick();     // about 10 times a second: the clocks, the dot, the previews
         for (int i = pulses.Count - 1; i >= 0; i--) if (!pulses[i].Tick()) pulses.RemoveAt(i);
         // keys that exist only while they mean something
         keys.Set(1, 0x1B, 0, voice.Busy || DateTime.Now < escAgainUntil, Escape);

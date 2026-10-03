@@ -11,11 +11,14 @@ const SCRIPT = join(import.meta.dir, "..", "native", "win", "fastlane.ps1");
 
 export interface FastTarget { pid: number; hwnd?: number; frame: { x: number; y: number; w: number; h: number }; role: string; label?: string }
 export interface FastResult { ok: boolean; ms: number; how?: string; error?: string }
+/** one control from a fast read (UI Automation, one cached call) */
+export interface FastElement { i: number; role: string; name: string; value?: string; toggle?: "on" | "off"; selected?: boolean; expanded?: boolean; enabled?: boolean; offscreen?: boolean; x: number; y: number; w: number; h: number }
+export interface FastRead extends FastResult { seq?: number; title?: string; elements?: FastElement[] }
 
 export class FastLane {
   private proc?: Subprocess<"pipe", "pipe", "ignore">;
   private next = 1;
-  private waiting = new Map<number, (r: FastResult) => void>();
+  private waiting = new Map<number, (r: any) => void>();
   private state: "starting" | "on" | "off" = "starting";
   private ready: Promise<void>;
   reason = "";
@@ -70,7 +73,7 @@ export class FastLane {
           try { j = JSON.parse(line); } catch { continue; }
           if (first) { first = false; hello(j); continue; }
           const done = this.waiting.get(j.id);
-          if (done) { this.waiting.delete(j.id); done({ ok: !!j.ok, ms: j.ms ?? 0, how: j.how, error: j.error }); }
+          if (done) { this.waiting.delete(j.id); done({ ...j, ok: !!j.ok, ms: j.ms ?? 0 }); }
         }
       }
     } catch { /* the helper exited */ }
@@ -78,13 +81,24 @@ export class FastLane {
   }
 
   private request(op: "press" | "type" | "restore", t: FastTarget, text?: string): Promise<FastResult> {
+    return this.send({ op, pid: t.pid, hwnd: t.hwnd ?? 0, x: t.frame.x, y: t.frame.y, w: t.frame.w, h: t.frame.h, role: t.role, label: t.label ?? "", text })
+      .then(j => ({ ok: !!j.ok, ms: j.ms ?? 0, how: j.how, error: j.error }));
+  }
+
+  /** a window's controls in one cached UI Automation call (the fast way to read; Cua walks control by control) */
+  read(hwnd: number, max = 1500): Promise<FastRead> { return this.send({ op: "read", hwnd, max }, 8000); }
+  /** act on a control from the latest read ("hwnd:read:index"): no search */
+  pressRef(ref: string) { return this.send({ op: "press", ref }); }
+  typeRef(ref: string, text: string) { return this.send({ op: "type", ref, text }); }
+
+  private send(body: object, timeoutMs = 6000): Promise<any> {
     if (!this.on || !this.proc) return Promise.resolve({ ok: false, ms: 0, error: "fast lane off" });
     const id = this.next++;
-    const msg = { id, op, pid: t.pid, hwnd: t.hwnd ?? 0, x: t.frame.x, y: t.frame.y, w: t.frame.w, h: t.frame.h, role: t.role, label: t.label ?? "", text };
-    return new Promise<FastResult>(resolve => {
+    const msg = { id, ...body };
+    return new Promise<any>(resolve => {
       // the helper never acts after 3 s of looking and answers a blocking press within 1.5 s: no answer in 6 s means
       // nothing was done, so Cua can do it
-      const timer = setTimeout(() => { this.waiting.delete(id); resolve({ ok: false, ms: 6000, error: "no answer in 6 s" }); }, 6000);
+      const timer = setTimeout(() => { this.waiting.delete(id); resolve({ ok: false, ms: timeoutMs, error: `no answer in ${timeoutMs / 1000} s` }); }, timeoutMs);
       this.waiting.set(id, r => { clearTimeout(timer); resolve(r); });
       try {
         // non-ASCII escaped: safe whatever code page PowerShell reads with

@@ -293,8 +293,12 @@ function onLog(l) {
     const res = l.result && !l.result.ok ? ` · refused: ${esc(l.result.error && l.result.error.code)}` : "";
     const why = d.backend === "claude" && d.why ? ` <span class="sub">(${esc(d.why)})</span>` : "";
     line(`<b>${esc(d.kind)}</b>${it ? " → " + esc(it.text) : ""}${extra}${fast}${res}${l.note ? ` · ${esc(l.note)}` : ""}${why}`, col(id), l.result && !l.result.ok ? "bad" : "",
-      `<span>${esc(a ? a.name + " · " + a.app : parts[l.taskId] > 1 ? "part " + (l.sub + 1) : "agent")} · step ${l.step} · <span class="tag ${esc(d.backend)}">${esc(d.backend)}</span>${d.backend === "jev" ? " gate " + d.gate.toFixed(2) : ""}</span><span>decide ${d.ms} ms · act ${l.ms.act} ms</span>`);
+      `<span>${esc(a ? a.name + " · " + a.app : parts[l.taskId] > 1 ? "part " + (l.sub + 1) : "agent")} · step ${l.step} · <span class="tag ${esc(d.backend)}">${esc(d.backend)}</span>${d.backend === "jev" ? " gate " + d.gate.toFixed(2) : ""}</span><span>read ${l.ms.observe} ms · decide ${d.ms} ms · act ${l.ms.act} ms</span>`);
     if (S) renderAgents();
+  } else if (l.type === "notice") {
+    const m = /^(\w+\/\d+): (.*)$/.exec(l.text);
+    const a = m && agents[m[1]];
+    line(esc(m ? m[2] : l.text), m ? col(m[1]) : grey, "", `<span>${esc(a ? a.name + " · " + a.app : "note")}</span>`);
   } else if (l.type === "approval") line(`${l.approved ? "approved" : "denied"}: ${esc(l.request.action)}`, grey, l.approved ? "good" : "warn");
   else if (l.type === "verify") line(`${l.complete ? "done" : "not done yet"}: ${esc(l.evidence)}`, col(`${l.taskId}/${l.sub}`), l.complete ? "good" : "warn", `<span>check (${esc(l.by)})</span><span>${l.ms} ms</span>`);
   else if (l.type === "files") line(l.results.length ? `${l.results.filter((r) => r.ok).length}/${l.results.length} done: ${esc(l.results.slice(0, 3).map((r) => r.detail).join("; "))}` : "looked, nothing changed", col(`${l.taskId}/${l.sub}`), l.results.every((r) => r.ok) ? "good" : "bad", "<span>files</span>");

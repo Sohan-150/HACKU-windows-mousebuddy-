@@ -11,6 +11,9 @@
 #   {"id":1,"op":"press","pid":123,"hwnd":456,"x":10,"y":20,"w":40,"h":30,"role":"Button","label":"Seven"}
 #   {"id":2,"op":"type", ...same..., "text":"hello"}
 #   {"id":3,"op":"restore","hwnd":456}       a minimised window shown again, without taking the foreground
+#   {"id":4,"op":"read","hwnd":456,"max":1500}   the window's controls in ONE cached call (name, type, frame, value,
+#        toggle, selected, expanded, enabled, offscreen) -> {"ok":true,"seq":7,"title":"...","elements":[{"i":0,...}]}
+#   {"id":5,"op":"press","ref":"456:7:12"} / {"op":"type","ref":"456:7:12","text":"hi"}   act on a control from that read
 #   -> {"id":1,"ok":true,"ms":3.1,"how":"hit-test invoke"}  or  {"id":1,"ok":false,"error":"..."}
 # On start it prints {"ready":true}. Coordinates are physical screen pixels (the same space as Cua's frames).
 #
@@ -43,6 +46,68 @@ public static class FastLane {
     static readonly JavaScriptSerializer json = new JavaScriptSerializer();
     static TextWriter stdout;
     static readonly Dictionary<string, ControlType> types = new Dictionary<string, ControlType>(StringComparer.OrdinalIgnoreCase);
+    // the controls of each window's latest read, so an action needs no search: window -> (read number, index -> control)
+    static readonly Dictionary<long, KeyValuePair<int, List<AutomationElement>>> reads = new Dictionary<long, KeyValuePair<int, List<AutomationElement>>>();
+    static int readSeq;
+
+    /** all the window's controls in one call: a cached FindAll returns every property at once (the fast way to read
+     *  UI Automation; walking the tree control by control costs a round trip each) */
+    static void Read(Dictionary<string, object> r, Dictionary<string, object> d) {
+        long hw = (long)Num(r, "hwnd");
+        int max = (int)Num(r, "max"); if (max <= 0) max = 1500;
+        var root = AutomationElement.FromHandle(new IntPtr(hw));
+        if (root == null) throw new Exception("no such window");
+        var cr = new CacheRequest();
+        cr.Add(AutomationElement.NameProperty); cr.Add(AutomationElement.ControlTypeProperty); cr.Add(AutomationElement.BoundingRectangleProperty);
+        cr.Add(AutomationElement.IsEnabledProperty); cr.Add(AutomationElement.IsOffscreenProperty);
+        cr.Add(ValuePattern.ValueProperty); cr.Add(TogglePattern.ToggleStateProperty); cr.Add(SelectionItemPattern.IsSelectedProperty);
+        cr.Add(ExpandCollapsePattern.ExpandCollapseStateProperty);
+        AutomationElementCollection all;
+        using (cr.Activate()) all = root.FindAll(TreeScope.Descendants, Automation.ControlViewCondition);
+        var list = new List<object>();
+        var keep = new List<AutomationElement>();
+        foreach (AutomationElement e in all) {
+            if (keep.Count >= max) break;
+            Rect f; ControlType ct;
+            try { f = e.Cached.BoundingRectangle; ct = e.Cached.ControlType; } catch { continue; }
+            if (f.IsEmpty || f.Width < 1 || f.Height < 1 || ct == null) continue;
+            var o = new Dictionary<string, object>();
+            o["i"] = keep.Count;
+            o["role"] = ct.ProgrammaticName.Replace("ControlType.", "");
+            string name = ""; try { name = e.Cached.Name ?? ""; } catch { }
+            o["name"] = name;
+            object v = Cached(e, ValuePattern.ValueProperty); if (v is string && (string)v != "") o["value"] = ((string)v).Length > 2000 ? ((string)v).Substring(0, 2000) : v;
+            object tg = Cached(e, TogglePattern.ToggleStateProperty); if (tg is ToggleState) o["toggle"] = (ToggleState)tg == ToggleState.On ? "on" : "off";
+            object sel = Cached(e, SelectionItemPattern.IsSelectedProperty); if (sel is bool && (bool)sel) o["selected"] = true;
+            object ex = Cached(e, ExpandCollapsePattern.ExpandCollapseStateProperty); if (ex is ExpandCollapseState) o["expanded"] = (ExpandCollapseState)ex == ExpandCollapseState.Expanded;
+            try { if (!e.Cached.IsEnabled) o["enabled"] = false; } catch { }
+            try { if (e.Cached.IsOffscreen) o["offscreen"] = true; } catch { }
+            o["x"] = Math.Round(f.X); o["y"] = Math.Round(f.Y); o["w"] = Math.Round(f.Width); o["h"] = Math.Round(f.Height);
+            list.Add(o);
+            keep.Add(e);
+        }
+        int seq;
+        lock (reads) { seq = ++readSeq; reads[hw] = new KeyValuePair<int, List<AutomationElement>>(seq, keep); }
+        string title = ""; try { title = root.Current.Name ?? ""; } catch { }
+        d["ok"] = true; d["seq"] = seq; d["title"] = title; d["elements"] = list; d["how"] = "read " + list.Count;
+    }
+
+    static object Cached(AutomationElement e, AutomationProperty p) {
+        try { var v = e.GetCachedPropertyValue(p, true); return v == AutomationElement.NotSupported ? null : v; } catch { return null; }
+    }
+
+    /** a control from a window's latest read ("hwnd:read:index"); null when that read is no longer the latest */
+    static AutomationElement FromRef(string reference) {
+        var parts = reference.Split(':');
+        if (parts.Length != 3) return null;
+        long hw; int seq, i;
+        if (!long.TryParse(parts[0], out hw) || !int.TryParse(parts[1], out seq) || !int.TryParse(parts[2], out i)) return null;
+        lock (reads) {
+            KeyValuePair<int, List<AutomationElement>> got;
+            if (!reads.TryGetValue(hw, out got) || got.Key != seq || i < 0 || i >= got.Value.Count) return null;
+            return got.Value[i];
+        }
+    }
 
     static void Reply(Dictionary<string, object> d) {
         lock (writeLock) { try { stdout.WriteLine(json.Serialize(d)); stdout.Flush(); } catch { } }
@@ -69,7 +134,9 @@ public static class FastLane {
         public bool Matches(AutomationElement e) {
             try {
                 var c = e.Current;
-                if (c.ProcessId != Pid || c.ControlType == null || !string.Equals(c.ControlType.ProgrammaticName, "ControlType." + Role, StringComparison.OrdinalIgnoreCase)) return false;
+                // the process is not compared: a Store app's window belongs to its frame host (ApplicationFrameHost) and
+                // its buttons to the app itself (CalculatorApp), so they never match. Type, name and frame identify it.
+                if (c.ControlType == null || !string.Equals(c.ControlType.ProgrammaticName, "ControlType." + Role, StringComparison.OrdinalIgnoreCase)) return false;
                 var f = c.BoundingRectangle;
                 if (f.IsEmpty) return false;
                 if (Math.Abs(f.X - R.X) > 3 || Math.Abs(f.Y - R.Y) > 3 || Math.Abs(f.Width - R.Width) > 3 || Math.Abs(f.Height - R.Height) > 3) return false;
@@ -96,14 +163,14 @@ public static class FastLane {
             }
         } catch { }
         // behind another window (the agents work in the background), or the hit-test landed on a sibling: search the
-        // app's windows, descending only into elements that overlap the target (like the Mac version), for 600 ms
+        // app's windows, descending only into elements that overlap the target (like the Mac version), for 300 ms
         ControlType type;
         if (!types.TryGetValue(t.Role, out type)) return null;
         var roots = new List<AutomationElement>();
         try {
             if (t.Hwnd != 0) {
                 var w = AutomationElement.FromHandle(new IntPtr(t.Hwnd));
-                if (w != null && w.Current.ProcessId == t.Pid) roots.Add(w);
+                if (w != null) roots.Add(w);    // the agent's own window (its process may differ: Store apps)
             }
         } catch { }
         try {
@@ -113,7 +180,7 @@ public static class FastLane {
                 if (!dup) roots.Add(w);
             }
         } catch { }
-        long until = sw.ElapsedMilliseconds + 600;
+        long until = sw.ElapsedMilliseconds + 300;
         foreach (var root in roots) {
             if (t.Matches(root)) { how = "search"; return root; }
             var found = Search(t, type, root, sw, until);
@@ -168,6 +235,9 @@ public static class FastLane {
             if (err != null) throw err;
             return "invoke";
         }
+        // a list row without Invoke (a chat in a chat list): Select would only highlight it; a real click opens it (Cua)
+        var ct = e.Current.ControlType;
+        if (ct == ControlType.ListItem || ct == ControlType.DataItem || ct == ControlType.TreeItem) throw new Exception("a list row needs a click");
         if (e.TryGetCurrentPattern(TogglePattern.Pattern, out p)) { ((TogglePattern)p).Toggle(); return "toggle"; }
         if (e.TryGetCurrentPattern(SelectionItemPattern.Pattern, out p)) { ((SelectionItemPattern)p).Select(); return "select"; }
         if (e.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out p)) {
@@ -209,6 +279,20 @@ public static class FastLane {
                 if (h == IntPtr.Zero) throw new Exception("no window");
                 if (IsIconic(h)) ShowWindowAsync(h, 4);
                 d["ok"] = true; d["how"] = "restore";
+                d["ms"] = Math.Round(sw.Elapsed.TotalMilliseconds, 1);
+                Reply(d);
+                return;
+            }
+            if (op == "read") { Read(r, d); d["ms"] = Math.Round(sw.Elapsed.TotalMilliseconds, 1); Reply(d); return; }
+            string reference = Str(r, "ref");
+            if (reference != "") {
+                // a control from the latest read: no search, act at once
+                var el = FromRef(reference);
+                if (el == null) throw new Exception("stale: the window was read again since");
+                if (!el.Current.IsEnabled) throw new Exception("the control is disabled");
+                string done = op == "press" ? Press(el) : op == "type" ? SetText(el, Str(r, "text")) : null;
+                if (done == null) throw new Exception("unknown op " + op);
+                d["ok"] = true; d["how"] = "ref " + done;
                 d["ms"] = Math.Round(sw.Elapsed.TotalMilliseconds, 1);
                 Reply(d);
                 return;

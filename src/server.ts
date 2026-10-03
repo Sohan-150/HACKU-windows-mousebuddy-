@@ -26,6 +26,7 @@ import { send as overlaySend, type OverlayEvent } from "./overlay";
 import { cursorNow } from "./pointer";
 import { spokenSummary, tidyAnswer } from "./results";
 import { codeRoute, route } from "./router";
+import { splitParts } from "./planner";
 import { speak, stopSpeaking } from "./speak";
 import type { Voice } from "./voice";
 
@@ -165,6 +166,21 @@ export class App {
       return;
     }
     if (!q) { this.explainer.discard(); this.send({ cmd: "idle" }); return; }
+    // "mute me on Discord and then show me how to calculate 5 times 79": the job goes to the agents, and the "show me
+    // how" part is taught on the screen (the user does it), at the same time
+    const parts = splitParts(q);
+    if (parts.length > 1 && this.desktop) {
+      const ctx = { lesson: this.explainer.inLesson, agentsBusy: this.busy };
+      const teach = parts.filter(p => codeRoute(p, ctx) === "explain" && !this.explainer.inCode(p));
+      const jobs = parts.filter(p => !teach.includes(p));
+      if (teach.length && jobs.length) {
+        this.explainer.discard();
+        const t = this.addTask(jobs.join(". "), source);
+        this.fromHotkey.add(t.id);
+        void this.startExplain(teach.join(". "), source, cursor).done;
+        return;
+      }
+    }
     const r = await route(q, { lesson: this.explainer.inLesson, agentsBusy: this.busy, jev: this.jev?.extra?.choose ? { choose: this.jev.extra.choose.bind(this.jev.extra) } : null });
     console.log(`[route] "${q.slice(0, 60)}" -> ${r.to} (${r.via}${r.confidence !== undefined ? ` ${r.confidence.toFixed(2)}` : ""}, ${r.ms} ms)`);
     if (r.to === "stop") {

@@ -10,6 +10,7 @@
 # Protocol: one JSON request per line on stdin, one JSON reply per line on stdout (requests run at the same time).
 #   {"id":1,"op":"press","pid":123,"hwnd":456,"x":10,"y":20,"w":40,"h":30,"role":"Button","label":"Seven"}
 #   {"id":2,"op":"type", ...same..., "text":"hello"}
+#   {"id":3,"op":"restore","hwnd":456}       a minimised window shown again, without taking the foreground
 #   -> {"id":1,"ok":true,"ms":3.1,"how":"hit-test invoke"}  or  {"id":1,"ok":false,"error":"..."}
 # On start it prints {"ready":true}. Coordinates are physical screen pixels (the same space as Cua's frames).
 #
@@ -35,6 +36,8 @@ using System.Web.Script.Serialization;
 public static class FastLane {
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr hWnd, int cmd);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
 
     static readonly object writeLock = new object();
     static readonly JavaScriptSerializer json = new JavaScriptSerializer();
@@ -200,6 +203,16 @@ public static class FastLane {
         d["id"] = r.ContainsKey("id") ? r["id"] : 0;
         try {
             string op = Str(r, "op");
+            if (op == "restore") {
+                // a minimised window shown again WITHOUT taking the foreground (SW_SHOWNOACTIVATE)
+                var h = new IntPtr((long)Num(r, "hwnd"));
+                if (h == IntPtr.Zero) throw new Exception("no window");
+                if (IsIconic(h)) ShowWindowAsync(h, 4);
+                d["ok"] = true; d["how"] = "restore";
+                d["ms"] = Math.Round(sw.Elapsed.TotalMilliseconds, 1);
+                Reply(d);
+                return;
+            }
             var t = new Target();
             t.Pid = (int)Num(r, "pid"); t.Hwnd = (long)Num(r, "hwnd");
             t.R = new Rect(Num(r, "x"), Num(r, "y"), Math.Max(0, Num(r, "w")), Math.Max(0, Num(r, "h")));

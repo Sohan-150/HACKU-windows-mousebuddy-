@@ -77,3 +77,51 @@ export function screenText(obs: Observation, maxChars: number): string[] {
 export function signature(obs: Observation, items: Item[]): string {
   return JSON.stringify([obs.url ?? obs.title, items.map(i => [i.id, i.value ?? "", i.state ?? ""]), obs.text.slice(0, 40)]);
 }
+
+// ---------- finding the line that answers a question (ported from the Mac version) ----------
+
+/** what an answer to the question LOOKS like ("what time" -> 8:00 p.m.), for lines that share no words with it */
+const ANSWER_SHAPES: [RegExp, RegExp][] = [
+  [/\bwhat time\b|\bwhen does\b|\bopening hours\b|\bopen until\b|\bstarts?\b|\bcloses?\b/i, /\b\d{1,2}(:\d{2})?\s*(a\.?m\.?|p\.?m\.?)|\b\d{1,2}:\d{2}\b|\bo'clock\b|\(\d{2}:\d{2}\)/i],
+  [/\bhow much\b|\bprice\b|\bcost\b|\bfee\b|\bin (hong kong |us |hk )?dollars\b|\bexchange\b|\bstock\b/i, /[$¥€£]|\bHK\$|\b(HKD|USD|JPY|EUR|GBP|dollars?|yen)\b/i],
+  [/\bhow (long|far)\b|\bduration\b|\bflight time\b|\bdistance\b|\btravel time\b/i, /\b\d+(\.\d+)?\s*(h|hr|hrs|hours?|min|mins|minutes?|km|kilomet(re|er)s?|miles?)\b/i],
+  [/\bhow (tall|high)\b|\bheight\b|\belevation\b/i, /\b\d[\d,.]*\s*(m|metres?|meters?|ft|feet)\b/i],
+  [/\bwhen\b|\byear\b|\bfounded\b|\bborn\b|\bbuilt\b/i, /\b(1[5-9]|20)\d{2}\b/],
+  [/\bpopulation\b|\bhow many\b/i, /\b\d[\d,.]*\s*(million|billion|thousand|people|residents)?\b/i],
+  [/\bweather\b|\btemperature\b/i, /°|\bdegrees?\b/i],
+];
+
+/** a question whose answer must contain a number ("how much", "what year", "the weather") */
+export const NEEDS_NUMBER = /\b(how (many|much|tall|long|old|far)|population|year|when|price|cost|number|percent|temperature|weather|forecast)\b/i;
+
+/** web pages split sentences across text runs: "… starts every night at" + "8:00 p.m. sharp" -> one line */
+export function joinFragments(screen: string[]): string[] {
+  const out: string[] = [];
+  for (const line of screen) {
+    const prev = out[out.length - 1];
+    if (prev && /\b(at|is|are|was|from|of|by|to|around|about|approximately|until|costs?|takes?)$|[:–-]$/i.test(prev) && /^[\d$¥€£(]|^(HK\$|US\$)/.test(line) && line.length < 120) {
+      out[out.length - 1] = `${prev} ${line}`;
+    } else out.push(line);
+  }
+  return out;
+}
+
+const wordList = (s: string) => s.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+
+/** the n lines most useful for a goal, in page order: the first few (titles, displays) plus the ones sharing the most
+ *  words with it, or shaped like its answer */
+export function relevantLines(screen: string[], goal: string, n = 40, head = 12): string[] {
+  if (screen.length <= n) return screen;
+  const g = new Set(wordList(goal).filter(w => w.length > 2));
+  const shapes = ANSWER_SHAPES.filter(([q]) => q.test(goal)).map(([, a]) => a);
+  const scored = screen.map((line, i) => ({
+    line, i,
+    s: wordList(line).filter(w => g.has(w)).length + (/\d{3,4}/.test(line) ? 0.5 : 0) + (shapes.some(a => a.test(line)) ? 3 : 0),
+  }));
+  const pick = new Set<number>(scored.slice(0, head).map(x => x.i));
+  for (const x of [...scored].sort((a, b) => b.s - a.s)) {
+    if (pick.size >= n) break;
+    pick.add(x.i);
+  }
+  return scored.filter(x => pick.has(x.i)).map(x => x.line);
+}

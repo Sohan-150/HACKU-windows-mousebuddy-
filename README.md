@@ -27,13 +27,16 @@ Measured runs are in [evidence/live-jev-only.md](evidence/live-jev-only.md). Win
 | "When was HKU founded?", "what's the capital of Australia" | web search, the answer line read off the page |
 | "What's the weather in Tokyo" | current weather (wttr.in) |
 | "Find flights from Hong Kong to Tokyo on 20 November" | Google Flights results; cheapest top option read out. Never books or pays |
-| "Directions from Central to the airport" | Google Maps route and time |
+| "Directions from Central to the airport", "how long to walk from HKU to Kennedy Town", "... by public transport" | Google Maps route and time, in the travel mode asked for (driving, walking, transit, cycling) |
+| "Check Sony stock price", "what's Nvidia's share price" | the quote page opened straight on that symbol (Google Finance) |
+| "Message Mohit hi on WhatsApp", "reply to Sam saying on my way" | the chat app: searches for the contact if it isn't on screen, puts the name in the search box and the text in the message box, sends only when asked |
 | "Play lofi beats on YouTube", "search GitHub for bun" | the site's own search page, then the first match |
 | "What is 15% of 80", "calculate 128.5 times 12" | Windows Calculator, result checked in code |
 | "Write \"call the dentist\" in Notepad", then "write that in Notepad" | Notepad, text read back in code; follow-ups use the last answer |
 | "Organise my Downloads", "convert the PNGs on my Desktop to jpg", "how many PDFs in Documents" | files on disk: preview, approval, check, **Undo** |
 | "Find the weather in Tokyo then write it in Notepad" | multi-step: up to 5 parts, each checked |
 | "Find flights to Botswana and at the same time play Drake on Spotify" | parts that don't need each other run at once (two browser windows, two desktop apps); one that fails doesn't stop the others |
+| "I am flying to Tokyo tomorrow. In Maps, how long ... to the airport, in Weather check the weather in Tokyo, in Stocks check Sony stock price, and make a word doc with a 3 day itinerary" | one part per app (the Mac version's showcase); the first sentence asks for nothing, so it is context, not a part; with 3+ agents each spoken result is cut to its gist |
 | "Launch Fortnite from Epic Games" | started with the launcher's own link (Steam too); an update or sign-in it needs is reported |
 | "Open my coding folder and tell me what is inside" | found by name, opened in File Explorer, its folders and files listed |
 | Point + "what is this?" / "where is settings?" / "read this" | explain mode: the control under the pointer is named (and ringed for "where is") |
@@ -52,6 +55,8 @@ evidence file.
 - Never types into password, card or ID fields; never completes a purchase or booking.
 - Files: only inside your user folder, never deleted, never overwritten (`a (1).txt`), every move undoable.
 - Existing text in an app is never replaced silently: it opens a new tab, or asks.
+- Messages: a message box is filled, and Enter or Send pressed in it, only when the request asks to send something;
+  the name of who to reach never goes into a message box (from the Mac version's WhatsApp runs).
 - Explain mode is read-only: it never clicks or types. The overlay (buddy, drawings, widgets) is click-through and never
   takes focus, except the typing box you open and the widgets, which you can drag. Your mouse is never moved.
 - The fast lane acts only on the exact control the agent saw (same app, control type, name and position within 3
@@ -112,8 +117,9 @@ voice helpers as in [native/mac/README.md](native/mac/README.md) (Right-Option);
   3 seconds.
 - **The buddy and the widgets.** A small buddy follows your cursor and shows listening / thinking / the answer, then
   flies to what it is explaining. While agents work, each has a widget in the bottom-right corner (drag them anywhere):
-  its colour, its app, what it is doing now, a running clock and its result; parts waiting for a browser window or app
-  say so. Every press or text insert flashes a ring in the agent's colour where it happened. The tray icon has Ask,
+  its colour, its app, what it is doing now, a running clock, its result, and a **live preview of the window it works
+  in** (about once a second, even when that window is behind others; a grid of 1-3 columns for up to 9 agents; the
+  tray menu turns previews off). Parts waiting for a browser window or app say so. Every press or text insert flashes a ring in the agent's colour where it happened. The tray icon has Ask,
   Clear drawings, Stop the agents, Hide the buddy when idle, and Quit (`OVERLAY=off` turns the overlay off).
 - **Voice.** Answers are spoken with ElevenLabs when `ELEVENLABS_API_KEY` is set (the first sentence is fetched on its
   own so speech starts in about half a second; the next lesson step is fetched while you listen), else with the Windows

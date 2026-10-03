@@ -170,6 +170,7 @@ export interface AgentState {
   status: "queued" | "running" | "done" | "failed";
   now: string; answer?: string; reason?: string;
   steps: number; seconds: number; startedAt?: number;
+  windowId?: number; pid?: number;   // the window it works in (for the live preview in its widget)
 }
 export type Approver = (r: ApprovalRequest) => Promise<boolean>;
 

@@ -1,0 +1,10 @@
+import { WinDriver } from "../src/driver/win";
+import { cuaCall } from "../src/driver/cli";
+const d = new WinDriver();
+await d.ensureSession("Mint-3");
+const b = await d.open("Mint-3", { kind: "browser", url: "" });
+const fmt = process.argv[2] ?? "semantic_v2";
+const r = await cuaCall("get_browser_state", { session: "Mint-3", target_id: b.targetId, tab_id: b.tabId, snapshot_format: fmt });
+const s = JSON.stringify(r.data);
+console.log("keys", Object.keys(r.data), "len", s.length);
+await Bun.write(process.env.TEMP + "/raw-" + fmt + ".json", JSON.stringify(r.data, null, 1));

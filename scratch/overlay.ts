@@ -1,0 +1,21 @@
+// Visual check of the overlay: three marks and a bubble; records foreground changes.
+import { dlopen, FFIType } from "bun:ffi";
+import { drawMark, showBubble, warmOverlay, stopOverlay } from "../src/overlay";
+const u32 = dlopen("user32.dll", { GetForegroundWindow: { returns: FFIType.ptr, args: [] } });
+const fg = () => String(u32.symbols.GetForegroundWindow());
+warmOverlay(); await Bun.sleep(1800);
+const before = fg(); let changes = 0; let last = before;
+const poll = setInterval(() => { const w = fg(); if (w !== last) { changes++; last = w; } }, 20);
+drawMark({ x: 700, y: 400, w: 160, h: 100 }, { shape: "ring", label: "cheetah", color: 0, ms: 3500 });
+drawMark({ x: 1000, y: 420, w: 140, h: 90 }, { shape: "box", label: "hippo", color: 1, ms: 3500 });
+drawMark({ x: 900, y: 650, w: 120, h: 40 }, { shape: "arrow", label: "here", color: 2, ms: 3500 });
+showBubble("The cheetah is on the left and the hippo is on the right. I've circled both for you.", { at: { x: 900, y: 300 }, title: "Answer", ms: 3500 });
+await Bun.sleep(1500);
+const { cuaCall } = await import("../src/driver/cli");
+await cuaCall("start_session", { session: "Blue-9" });
+const wins = (await cuaCall("list_windows", { session: "Blue-9" })).data.windows.filter((w: any) => /^agent-(mark|bubble)$/.test(w.title));
+console.log("overlay windows:", wins.map((w: any) => `${w.title} ${JSON.stringify(w.bounds)}`));
+await Bun.sleep(3000);
+clearInterval(poll);
+console.log("foreground changes while shown:", changes, "| unchanged at end:", fg() === before);
+stopOverlay(); process.exit(0);

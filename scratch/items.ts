@@ -1,0 +1,11 @@
+import { WinDriver } from "../src/driver/win";
+import { perceive } from "../src/perceive";
+import { firstMatch } from "../src/agent";
+const d = new WinDriver();
+await d.ensureSession("Mint-3");
+const b = await d.open("Mint-3", { kind: "browser", url: "" });
+const o = await d.observe("Mint-3", b);
+const { items } = perceive(o, process.argv[2] ?? "", 120);
+console.log("title", o.title, "items", items.length);
+for (const i of items.slice(0, 40)) console.log(" ", i.i, i.role, JSON.stringify(i.text.slice(0, 80)));
+console.log("firstMatch ->", firstMatch(items, process.argv[3] ?? ""));

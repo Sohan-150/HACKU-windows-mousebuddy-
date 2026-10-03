@@ -1,0 +1,5 @@
+node_modules/
+.env
+runs/
+native/win/.venv/
+native/win/__pycache__/

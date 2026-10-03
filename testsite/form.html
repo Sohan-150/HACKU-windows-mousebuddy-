@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claim form (replica)</title>
+<style>
+  body { font: 16px system-ui, -apple-system, "Segoe UI", sans-serif; margin: 24px auto; max-width: 520px; padding: 0 16px; color: #1d1d1f; background: #fff; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .note { color: #666; font-size: 13px; margin-top: 0; }
+  label { display: block; margin-top: 12px; }
+  input, select, textarea { font-size: 16px; width: 100%; box-sizing: border-box; padding: 6px; }
+  fieldset { margin-top: 12px; }
+  fieldset label { display: inline-block; margin-right: 16px; }
+  fieldset input { width: auto; }
+  .buttons { margin-top: 16px; display: flex; gap: 12px; }
+  button { font-size: 16px; padding: 8px 14px; }
+  {{chromiumSelect}}
+</style>
+</head>
+<body>
+<h1>Society reimbursement claim</h1>
+<p class="note">Replica for testing. Not a real claims system.</p>
+<form method="POST" action="/submit" autocomplete="off">
+  <label>Payee name <input name="payee" aria-label="Payee name" autocomplete="off" value="{{payee}}"></label>
+  <label>Amount (HKD) <input name="amount" aria-label="Amount (HKD)" inputmode="decimal" autocomplete="off" value="{{amount}}"></label>
+  <label>Date of expense (DD/MM/YYYY) <input name="date" aria-label="Date of expense (DD/MM/YYYY)" autocomplete="off" value="{{date}}"></label>
+  <label>Category
+    <select name="category" aria-label="Category">
+      <option value="">Choose…</option>
+      <option>Food</option>
+      <option>Transport</option>
+      <option>Printing</option>
+      <option>Venue</option>
+    </select>
+  </label>
+  <fieldset>
+    <legend>Paid by</legend>
+    <label><input type="radio" name="paidBy" value="Cash" aria-label="Cash"> Cash</label>
+    <label><input type="radio" name="paidBy" value="FPS" aria-label="FPS"> FPS</label>
+  </fieldset>
+  <label>Notes <textarea name="notes" aria-label="Notes" autocomplete="off">{{notes}}</textarea></label>
+  <div class="buttons">
+    <button type="submit">Submit claim</button>
+    <button type="button" aria-label="Clear form" onclick="clearForm()">Clear form</button>
+  </div>
+</form>
+<script>
+  // Empties every field. A type=reset button would restore the prefilled values of the ?dirty=1 page.
+  function clearForm() {
+    for (const el of document.querySelectorAll("input, textarea, select")) {
+      if (el.type === "radio") el.checked = false;
+      else if (el.tagName === "SELECT") el.selectedIndex = 0;
+      else el.value = "";
+    }
+  }
+</script>
+</body>
+</html>

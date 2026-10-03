@@ -1,0 +1,7 @@
+/* Sent only to Chromium browsers (the Windows agent browser); Safari gets the native control its measured recipe uses.
+     Chromium 135+ then draws the <select> picker inside the page instead of a native popup window, so a background
+     agent can click the options (a native popup takes no background input on Windows). It is still a real <select>. */
+  @supports (appearance: base-select) {
+    select, ::picker(select) { appearance: base-select; }
+    select { border: 1px solid #767676; border-radius: 4px; background: #fff; }
+  }

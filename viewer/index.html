@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Background Agent</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c1f24; --muted: #626a75; --line: #e1e4e8;
+    --accent: #1f8a70; --accent-ink: #ffffff; --warn: #8a5300; --warn-bg: #fff4e0;
+    --bad: #b42318; --bad-bg: #fde8e7; --good: #1f7a3a; --good-bg: #e6f4ea; --run: #1d5fa8; --run-bg: #e7f0fb;
+    --jev: #6b3fa0; --jev-bg: #f1eafb; --claude: #a04f1f; --claude-bg: #fbeee5;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121418; --panel: #1b1e24; --ink: #e8eaed; --muted: #9aa3ad; --line: #2c3139;
+      --accent: #3fbf96; --accent-ink: #0b1f18; --warn: #f0b45a; --warn-bg: #2e2416;
+      --bad: #ff8a80; --bad-bg: #3a1d1b; --good: #7ed69a; --good-bg: #17301f; --run: #8ab8f0; --run-bg: #18263a;
+      --jev: #c9a8f5; --jev-bg: #2a2038; --claude: #f3b48a; --claude-bg: #35241a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 18px; margin: 0 6px 0 0; }
+  .badge { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .badge.on { color: var(--good); background: var(--good-bg); border-color: transparent; }
+  .badge.off { color: var(--bad); background: var(--bad-bg); border-color: transparent; }
+  .notice { padding: 7px 16px; font-size: 13px; border-bottom: 1px solid var(--line); }
+  .notice.warn { background: var(--warn-bg); color: var(--warn); }
+  .notice.info { background: var(--run-bg); color: var(--run); }
+  .notice.error { background: var(--bad-bg); color: var(--bad); }
+  main { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 16px; padding: 16px; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 10px; }
+  textarea { width: 100%; min-height: 84px; resize: vertical; font: inherit; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .spread { justify-content: space-between; }
+  button { font: inherit; font-size: 14px; padding: 7px 13px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+  .examples button { font-size: 12.5px; padding: 4px 9px; color: var(--muted); }
+  .voice { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: var(--bad); animation: pulse 1s infinite; }
+  .dot.busy { background: var(--warn); }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .approval { border: 2px solid var(--warn); background: var(--warn-bg); color: var(--ink); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+  .approval b { color: var(--warn); }
+  .task { border-top: 1px solid var(--line); padding: 10px 0; }
+  .task:first-child { border-top: 0; padding-top: 0; }
+  .task .instr { font-weight: 600; overflow-wrap: anywhere; }
+  .pill { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; white-space: nowrap; }
+  .pill.queued, .pill.stopped { background: var(--line); color: var(--muted); }
+  .pill.planning, .pill.running { background: var(--run-bg); color: var(--run); }
+  .pill.done { background: var(--good-bg); color: var(--good); }
+  .pill.failed { background: var(--bad-bg); color: var(--bad); }
+  .answer { margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: var(--good-bg); overflow-wrap: anywhere; }
+  .reason { margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: var(--bad-bg); overflow-wrap: anywhere; }
+  .meta { color: var(--muted); font-size: 12.5px; margin-top: 6px; font-family: var(--mono); overflow-wrap: anywhere; }
+  .evidence { color: var(--muted); font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
+  #feed { font: 12.5px/1.55 var(--mono); max-height: 620px; overflow: auto; }
+  .ev { padding: 3px 0; border-bottom: 1px dashed var(--line); overflow-wrap: anywhere; }
+  .ev.dim { color: var(--muted); } .ev.good { color: var(--good); } .ev.bad { color: var(--bad); } .ev.warn { color: var(--warn); }
+  .who { display: inline-block; font-size: 11px; font-weight: 700; padding: 0 6px; border-radius: 4px; margin-right: 6px; }
+  .who.jev { color: var(--jev); background: var(--jev-bg); }
+  .who.claude { color: var(--claude); background: var(--claude-bg); }
+  .who.rule { color: var(--muted); background: var(--line); }
+  #status { font-size: 13px; color: var(--muted); }
+  select { font: inherit; font-size: 13px; padding: 5px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); max-width: 100%; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Background Agent</h1>
+  <span class="badge" id="jev">jev …</span>
+  <span class="badge" id="claude">Claude …</span>
+  <span class="badge" id="driver">driver …</span>
+  <span class="voice badge"><span class="dot" id="vdot"></span><span id="vtext">voice …</span></span>
+</header>
+<div id="notices"></div>
+<main>
+  <div>
+    <div id="approvals"></div>
+    <section>
+      <h2>What should it do?</h2>
+      <form id="form">
+        <textarea id="text" placeholder="e.g. Find out when the University of Hong Kong was founded" aria-label="Instruction"></textarea>
+        <div class="row spread" style="margin-top:8px">
+          <span class="hint" id="voicehint" style="margin:0">Type, or hold Ctrl and talk. Point the mouse at anything and ask "what is this?" or "where is save?".</span>
+          <span class="row"><button type="button" id="pointask" title="Type a question, press this, then point at something within 3 seconds">Point &amp; ask</button><button class="primary" type="submit">Run</button></span>
+        </div>
+      </form>
+      <div class="row examples" style="margin-top:10px" aria-label="Examples">
+        <button type="button">Find out when the University of Hong Kong was founded</button>
+        <button type="button">Find flights from Hong Kong to Tokyo on 20 November</button>
+        <button type="button">Calculate 128.5 times 12 in Calculator</button>
+        <button type="button">Open Notepad and write a shopping list: eggs, milk, bread</button>
+        <button type="button">Organise my Downloads folder</button>
+        <button type="button">Convert all PNG images on my Desktop to jpg</button>
+        <button type="button">Get directions from Central to the airport</button>
+      </div>
+      <p class="hint">It works in its own browser window or a desktop app, behind your windows, or directly on files in your user folder. Anything that looks irreversible (send, pay, submit, save, any file change) waits for your approval. It never deletes files, never overwrites them, and never types passwords or card numbers.</p>
+    </section>
+    <section>
+      <div class="row spread"><h2 style="margin:0">Tasks</h2><div class="row"><button id="undo" hidden>Undo last file moves</button><button class="danger" id="stop">Stop</button><button id="clear">Clear</button></div></div>
+      <div id="tasks" style="margin-top:10px"></div>
+    </section>
+  </div>
+  <div>
+    <section>
+      <div class="row spread"><h2 style="margin:0">Live steps</h2><span id="status">idle</span></div>
+      <div id="feed" style="margin-top:10px"><p class="hint">Each step shows who decided it: <span class="who jev">jev</span> the fast classifier, or <span class="who claude">claude</span> when jev was unsure or unavailable.</p></div>
+    </section>
+    <section>
+      <div class="row spread"><h2 style="margin:0">Past runs</h2><select id="runs" aria-label="Replay a past run"><option value="">Replay a past run…</option></select></div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const el = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); for (const k of kids) e.append(k); return e; };
+const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}) }).then(r => r.json());
+let state = null, lastDraft = "";
+
+function renderState(s) {
+  state = s;
+  $("jev").textContent = s.deciders.jev ? "TypeSafe jev: on" : "TypeSafe jev: off";
+  $("jev").className = "badge " + (s.deciders.jev ? "on" : "off");
+  $("claude").textContent = s.deciders.claude ? "Claude: on" : "Claude: off";
+  $("claude").className = "badge " + (s.deciders.claude ? "on" : "off");
+  $("driver").textContent = s.driver;
+  if (!$("vdot").classList.contains("live") && !$("vdot").classList.contains("busy")) $("vtext").textContent = s.voice;
+  $("notices").replaceChildren(...s.notices.map(n => el("div", { className: `notice ${n.level}`, textContent: n.text })));
+  if (s.draft && s.draft !== lastDraft) { $("text").value = s.draft; $("text").focus(); }
+  lastDraft = s.draft;
+
+  $("approvals").replaceChildren(...s.approvals.map(a => el("div", { className: "approval" },
+    el("div", {}, el("b", { textContent: "Needs your approval: " }), document.createTextNode(a.action)),
+    el("div", { className: "evidence", textContent: a.why }),
+    el("div", { className: "row", style: "margin-top:8px" },
+      el("button", { className: "primary", textContent: "Approve", onclick: () => post(`/api/approvals/${a.id}`, { approve: true }) }),
+      el("button", { className: "danger", textContent: "Deny", onclick: () => post(`/api/approvals/${a.id}`, { approve: false }) })))));
+
+  const tasks = [...s.tasks].reverse();
+  $("tasks").replaceChildren(...(tasks.length ? tasks.map(t => {
+    const box = el("div", { className: "task" },
+      el("div", { className: "row spread" }, el("span", { className: "instr", textContent: t.instruction }), el("span", { className: `pill ${t.status}`, textContent: t.status })));
+    if (t.result) {
+      box.append(el("div", { className: "answer", textContent: t.result.answer }));
+      if (t.result.evidence) box.append(el("div", { className: "evidence", textContent: `Evidence on screen: ${t.result.evidence}` }));
+    }
+    if (t.exception) box.append(el("div", { className: "reason", textContent: `${t.exception.code.replace("_", " ")}: ${t.exception.reason}` }));
+    if (t.endedAt) {
+      const c = t.counts, secs = ((Date.parse(t.endedAt) - Date.parse(t.startedAt)) / 1000).toFixed(1);
+      box.append(el("div", { className: "meta", textContent: `${secs} s · ${c.steps} steps · jev ${c.jev} calls, Claude ${c.claude} · ${c.gui} GUI actions${c.files ? ` · ${c.files} file actions` : ""} · ${c.approvals} approvals · cost $${(t.cost.jevUsd + t.cost.claudeUsd).toFixed(5)}` }));
+    }
+    return box;
+  }) : [el("p", { className: "hint", textContent: "No tasks yet." })]));
+  $("stop").disabled = !s.running && !s.tasks.some(t => t.status === "queued");
+  $("undo").hidden = !s.canUndo;
+  $("undo").disabled = !!s.running;
+}
+
+function feedLine(node, cls = "") {
+  const f = $("feed");
+  if (f.firstChild?.tagName === "P") f.replaceChildren();
+  f.append(el("div", { className: `ev ${cls}` }, node));
+  while (f.childElementCount > 500) f.firstChild.remove();
+  f.scrollTop = f.scrollHeight;
+}
+const txt = s => document.createTextNode(s);
+
+const where = sf => sf.kind === "browser" ? sf.url : sf.kind === "app" ? sf.app : sf.kind === "files" ? `files: ${sf.op.op}` : "answered directly";
+function onLog(l) {
+  if (l.type === "task_start") feedLine(txt(`▶ ${l.task.instruction}  (deciders: ${l.deciders.join(" + ") || "none"})`), "dim");
+  else if (l.type === "plan") {
+    if (l.plan.question) feedLine(txt(`plan: needs more information: ${l.plan.question}`), "warn");
+    else l.plan.subtasks.forEach((s, i) => feedLine(txt(`plan ${i + 1} (${l.plan.by}): ${where(s.surface)} → ${s.goal}${s.values.length ? `  [texts: ${s.values.map(v => v.name).join(", ")}]` : ""}${s.check ? "  [checked in code]" : ""}`), "dim"));
+  } else if (l.type === "step") {
+    const d = l.decision, it = d.item !== undefined ? l.items[d.item] : null;
+    const who = el("span", { className: `who ${d.backend}`, textContent: d.backend });
+    const p = d.backend === "jev" ? ` gate ${d.gate.toFixed(2)}` : "";
+    const what = it ? ` '${it.text}'` : "";
+    const extra = d.kind === "type" && l.acted?.text !== undefined ? ` ← ${JSON.stringify(l.acted.text.slice(0, 60))}` : l.acted?.url ? ` ${l.acted.url}` : "";
+    const res = l.result ? (l.result.ok ? ` · ${l.ms.act} ms` : ` · refused: ${l.result.error?.code}`) : "";
+    const why = d.backend === "claude" && d.why ? `  (${d.why})` : "";
+    const node = el("span", {}, who, txt(`#${l.step} ${d.kind}${what}${extra}${p}${res}${l.note ? ` · ${l.note}` : ""}${why}`));
+    feedLine(node, l.result && !l.result.ok ? "bad" : "");
+  } else if (l.type === "approval") feedLine(txt(`approval ${l.approved ? "given" : "denied"}: ${l.request.action}`), l.approved ? "good" : "warn");
+  else if (l.type === "verify") feedLine(txt(`check (${l.by}): ${l.complete ? "done" : "not done yet"} — ${l.evidence}`), l.complete ? "good" : "warn");
+  else if (l.type === "files") feedLine(txt(`files: ${l.results.length ? `${l.results.filter(r => r.ok).length}/${l.results.length} done — ${l.results.slice(0, 3).map(r => r.detail).join("; ")}` : "looked, nothing changed"}`), l.results.every(r => r.ok) ? "good" : "bad");
+  else if (l.type === "ask") feedLine(txt(`ask (${l.by}): "${l.question}" — pointer on ${l.element ?? "nothing readable"}${l.window ? ` in "${l.window}"` : ""} → ${l.answer}${l.pointedAt ? `  [cursor moved to ${l.pointedAt}]` : ""} · ${l.ms} ms`), "good");
+  else if (l.type === "task_end") feedLine(txt(`■ ${l.task.status}${l.task.exception ? ` (${l.task.exception.code}): ${l.task.exception.reason}` : `: ${l.task.result?.answer ?? ""}`}`), l.task.status === "done" ? "good" : "bad");
+}
+
+function onVoice(v) {
+  const dot = $("vdot"), t = $("vtext");
+  if (v.event === "down") { dot.className = "dot live"; t.textContent = "listening… (point at what you mean)"; }
+  else if (v.event === "up") { dot.className = "dot busy"; t.textContent = "transcribing…"; }
+  else { dot.className = "dot"; t.textContent = state?.voice ?? "voice"; }
+}
+
+const es = new EventSource("/events");
+es.onmessage = m => {
+  const e = JSON.parse(m.data);
+  if (e.type === "state") renderState(e.state);
+  else if (e.type === "voice") onVoice(e.voice);
+  else if (e.type === "status") $("status").textContent = e.text;
+  else onLog(e);
+};
+
+$("form").onsubmit = async ev => {
+  ev.preventDefault();
+  const text = $("text").value.trim();
+  if (!text) return;
+  await post("/api/tasks", { text, source: state?.draft && text === state.draft ? "voice" : "typed" });
+  $("text").value = "";
+};
+$("text").addEventListener("keydown", ev => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); $("form").requestSubmit(); } });
+for (const b of document.querySelectorAll(".examples button")) b.onclick = () => { $("text").value = b.textContent; $("text").focus(); };
+$("pointask").onclick = async () => {
+  const text = $("text").value.trim(), b = $("pointask");
+  if (!text) { $("text").placeholder = "Type a question first, e.g. What does this button do?"; $("text").focus(); return; }
+  b.disabled = true;
+  for (let n = 3; n > 0; n--) { b.textContent = `Point now… ${n}`; await new Promise(r => setTimeout(r, 1000)); }
+  b.textContent = "Looking…";
+  const r = await post("/api/ask", { text, delayMs: 0 }).catch(() => ({}));
+  if (r.error) feedLine(txt(`ask: ${r.error}`), "bad"); else $("text").value = "";
+  b.textContent = "Point & ask"; b.disabled = false;
+};
+$("stop").onclick = () => post("/api/stop");
+$("clear").onclick = () => post("/api/clear");
+$("undo").onclick = () => post("/api/undo-moves");
+
+fetch("/api/runs").then(r => r.json()).then(runs => { for (const r of runs) $("runs").append(el("option", { value: r, textContent: r })); });
+$("runs").onchange = async () => {
+  const id = $("runs").value; if (!id) return;
+  const text = await (await fetch(`/api/runs/${id}`)).text();
+  $("feed").replaceChildren();
+  for (const line of text.split("\n")) if (line) onLog(JSON.parse(line));
+};
+</script>
+</body>
+</html>

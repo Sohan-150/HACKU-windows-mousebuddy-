@@ -1,0 +1,10 @@
+import { WinDriver } from "../src/driver/win";
+const d = new WinDriver();
+await d.ensureSession("Mint-3");
+const b = await d.open("Mint-3", { kind: "browser", url: process.argv[2] });
+await Bun.sleep(1500);
+const o = await d.observe("Mint-3", b);
+console.log("one snapshot:", o.text.length, "lines,", o.text.join(" ").length, "chars; 1911:", o.text.some(t => /1911/.test(t)));
+const t0 = performance.now();
+const more = await d.readMore("Mint-3", b, 4);
+console.log("readMore:", more.length, "lines,", more.join(" ").length, "chars in", Math.round(performance.now() - t0), "ms; 1911 lines:", more.filter(t => /1911/.test(t)).slice(0, 3));

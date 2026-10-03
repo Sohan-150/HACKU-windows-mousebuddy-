@@ -1,0 +1,617 @@
+{
+ "content_refs": [
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Claim form (replica)",
+   "ref": "p487:0",
+   "role": "rootwebarea",
+   "states": {
+    "focusable": true,
+    "focused": true
+   },
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Society reimbursement claim",
+   "ref": "p487:7",
+   "role": "heading",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:8",
+   "role": "paragraph",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Replica for testing. Not a real claims system.",
+   "ref": "p487:9",
+   "role": "statictext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:10",
+   "role": "form",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:11",
+   "role": "labeltext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Payee name",
+   "ref": "p487:12",
+   "role": "statictext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:13",
+   "role": "labeltext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Amount (HKD)",
+   "ref": "p487:14",
+   "role": "statictext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:15",
+   "role": "labeltext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Date of expense (DD/MM/YYYY)",
+   "ref": "p487:16",
+   "role": "statictext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:17",
+   "role": "labeltext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Category",
+   "ref": "p487:18",
+   "role": "statictext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Paid by",
+   "ref": "p487:19",
+   "role": "group",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:20",
+   "role": "legend",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Paid by",
+   "ref": "p487:21",
+   "role": "statictext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:22",
+   "role": "labeltext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Cash",
+   "ref": "p487:23",
+   "role": "statictext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:24",
+   "role": "labeltext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "FPS",
+   "ref": "p487:25",
+   "role": "statictext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:29",
+   "role": "labeltext",
+   "states": {},
+   "value": null,
+   "visibility": "near_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Notes",
+   "ref": "p487:30",
+   "role": "statictext",
+   "states": {},
+   "value": null,
+   "visibility": "near_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:44",
+   "role": "menulistpopup",
+   "states": {},
+   "value": null,
+   "visibility": "unknown"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:45",
+   "role": "generic",
+   "states": {},
+   "value": null,
+   "visibility": "unknown"
+  }
+ ],
+ "mode": "snapshot",
+ "oopif": {
+  "frames": 0,
+  "status": "attached"
+ },
+ "outline": "- heading \"Society reimbursement claim\"\n- paragraph\n  - statictext \"Replica for testing. Not a real claims system.\"\n- form\n  - labeltext\n    - statictext \"Payee name\"\n    - textbox \"Payee name\": Chan Tai Man [editable=\"plaintext\",focusable=true,required=false]\n  - labeltext\n    - statictext \"Amount (HKD)\"\n    - textbox \"Amount (HKD)\": 128.50 [editable=\"plaintext\",focusable=true,required=false]\n  - labeltext\n    - statictext \"Date of expense (DD/MM/YYYY)\"\n    - textbox \"Date of expense (DD/MM/YYYY)\": 30/09/2026 [editable=\"plaintext\",focusable=true,required=false]\n  - labeltext\n    - statictext \"Category\"\n    - combobox \"Category\": Food [expanded=false,focusable=true]\n          - option \"Choose…\" [focusable=true,selected=false]\n          - option \"Food\" [focusable=true,selected=true]\n          - option \"Transport\" [focusable=true,selected=false]\n          - option \"Printing\" [focusable=true,selected=false]\n      - generic [editable=\"plaintext\"]\n          - option \"Venue\" [focusable=true,selected=false]\n      - generic [editable=\"plaintext\"]\n  - group \"Paid by\"\n    - legend\n      - generic [editable=\"plaintext\"]\n      - statictext \"Paid by\"\n      - menulistpopup\n    - labeltext\n      - radio \"Cash\" [checked=\"false\",focusable=true]\n      - statictext \"Cash\"\n    - labeltext\n      - radio \"FPS\" [checked=\"true\",focusable=true,focused=true]\n      - statictext \"FPS\"\n  - labeltext\n    - statictext \"Notes\"\n      - generic [editable=\"plaintext\"]\n    - textbox \"Notes\": gate W [editable=\"plaintext\",focusable=true,required=false]\n        - statictext \"Chan Tai Man\" [editable=\"plaintext\"]\n- button \"Submit claim\" [focusable=true]\n        - statictext \"128.50\" [editable=\"plaintext\"]\n- button \"Clear form\" [focusable=true]\n        - statictext \"30/09/2026\" [editable=\"plaintext\"]\n        - generic\n        - statictext \"gate W\" [editable=\"plaintext\"]",
+ "page": {
+  "title": "Claim form (replica)",
+  "url": "http://127.0.0.1:8765/"
+ },
+ "refs": [
+  {
+   "actions": [
+    "click",
+    "type",
+    "pointer"
+   ],
+   "frame": "main",
+   "name": "FPS",
+   "ref": "p487:1",
+   "role": "radio",
+   "states": {
+    "checked": "true",
+    "focusable": true,
+    "focused": true
+   },
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [
+    "type",
+    "pointer"
+   ],
+   "frame": "main",
+   "name": "Payee name",
+   "ref": "p487:2",
+   "role": "textbox",
+   "states": {
+    "editable": "plaintext",
+    "focusable": true,
+    "required": false
+   },
+   "value": "Chan Tai Man",
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [
+    "type",
+    "pointer"
+   ],
+   "frame": "main",
+   "name": "Amount (HKD)",
+   "ref": "p487:3",
+   "role": "textbox",
+   "states": {
+    "editable": "plaintext",
+    "focusable": true,
+    "required": false
+   },
+   "value": "128.50",
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [
+    "type",
+    "pointer"
+   ],
+   "frame": "main",
+   "name": "Date of expense (DD/MM/YYYY)",
+   "ref": "p487:4",
+   "role": "textbox",
+   "states": {
+    "editable": "plaintext",
+    "focusable": true,
+    "required": false
+   },
+   "value": "30/09/2026",
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [
+    "click",
+    "pointer"
+   ],
+   "frame": "main",
+   "name": "Category",
+   "ref": "p487:5",
+   "role": "combobox",
+   "states": {
+    "expanded": false,
+    "focusable": true
+   },
+   "value": "Food",
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [
+    "click",
+    "type",
+    "pointer"
+   ],
+   "frame": "main",
+   "name": "Cash",
+   "ref": "p487:6",
+   "role": "radio",
+   "states": {
+    "checked": "false",
+    "focusable": true
+   },
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [
+    "type",
+    "pointer"
+   ],
+   "frame": "main",
+   "name": "Notes",
+   "ref": "p487:26",
+   "role": "textbox",
+   "states": {
+    "editable": "plaintext",
+    "focusable": true,
+    "required": false
+   },
+   "value": "gate W",
+   "visibility": "near_viewport"
+  },
+  {
+   "actions": [
+    "click",
+    "pointer"
+   ],
+   "frame": "main",
+   "name": "Submit claim",
+   "ref": "p487:27",
+   "role": "button",
+   "states": {
+    "focusable": true
+   },
+   "value": null,
+   "visibility": "near_viewport"
+  },
+  {
+   "actions": [
+    "click",
+    "pointer"
+   ],
+   "frame": "main",
+   "name": "Clear form",
+   "ref": "p487:28",
+   "role": "button",
+   "states": {
+    "focusable": true
+   },
+   "value": null,
+   "visibility": "near_viewport"
+  },
+  {
+   "actions": [
+    "click"
+   ],
+   "frame": "main",
+   "name": "Choose…",
+   "ref": "p487:31",
+   "role": "option",
+   "states": {
+    "focusable": true,
+    "selected": false
+   },
+   "value": null,
+   "visibility": "unknown"
+  },
+  {
+   "actions": [
+    "click"
+   ],
+   "frame": "main",
+   "name": "Food",
+   "ref": "p487:32",
+   "role": "option",
+   "states": {
+    "focusable": true,
+    "selected": true
+   },
+   "value": null,
+   "visibility": "unknown"
+  },
+  {
+   "actions": [
+    "click"
+   ],
+   "frame": "main",
+   "name": "Transport",
+   "ref": "p487:33",
+   "role": "option",
+   "states": {
+    "focusable": true,
+    "selected": false
+   },
+   "value": null,
+   "visibility": "unknown"
+  },
+  {
+   "actions": [
+    "click"
+   ],
+   "frame": "main",
+   "name": "Printing",
+   "ref": "p487:34",
+   "role": "option",
+   "states": {
+    "focusable": true,
+    "selected": false
+   },
+   "value": null,
+   "visibility": "unknown"
+  },
+  {
+   "actions": [
+    "type"
+   ],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:35",
+   "role": "generic",
+   "states": {
+    "editable": "plaintext"
+   },
+   "value": null,
+   "visibility": "unknown"
+  },
+  {
+   "actions": [
+    "click"
+   ],
+   "frame": "main",
+   "name": "Venue",
+   "ref": "p487:36",
+   "role": "option",
+   "states": {
+    "focusable": true,
+    "selected": false
+   },
+   "value": null,
+   "visibility": "unknown"
+  },
+  {
+   "actions": [
+    "type"
+   ],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:37",
+   "role": "generic",
+   "states": {
+    "editable": "plaintext"
+   },
+   "value": null,
+   "visibility": "unknown"
+  },
+  {
+   "actions": [
+    "type"
+   ],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:38",
+   "role": "generic",
+   "states": {
+    "editable": "plaintext"
+   },
+   "value": null,
+   "visibility": "unknown"
+  },
+  {
+   "actions": [
+    "type"
+   ],
+   "frame": "main",
+   "name": null,
+   "ref": "p487:39",
+   "role": "generic",
+   "states": {
+    "editable": "plaintext"
+   },
+   "value": null,
+   "visibility": "unknown"
+  },
+  {
+   "actions": [
+    "type"
+   ],
+   "frame": "main",
+   "name": "Chan Tai Man",
+   "ref": "p487:40",
+   "role": "statictext",
+   "states": {
+    "editable": "plaintext"
+   },
+   "value": null,
+   "visibility": "unknown"
+  },
+  {
+   "actions": [
+    "type"
+   ],
+   "frame": "main",
+   "name": "128.50",
+   "ref": "p487:41",
+   "role": "statictext",
+   "states": {
+    "editable": "plaintext"
+   },
+   "value": null,
+   "visibility": "unknown"
+  },
+  {
+   "actions": [
+    "type"
+   ],
+   "frame": "main",
+   "name": "30/09/2026",
+   "ref": "p487:42",
+   "role": "statictext",
+   "states": {
+    "editable": "plaintext"
+   },
+   "value": null,
+   "visibility": "unknown"
+  },
+  {
+   "actions": [
+    "type"
+   ],
+   "frame": "main",
+   "name": "gate W",
+   "ref": "p487:43",
+   "role": "statictext",
+   "states": {
+    "editable": "plaintext"
+   },
+   "value": null,
+   "visibility": "unknown"
+  }
+ ],
+ "snapshot": {
+  "complete": true,
+  "continuation": null,
+  "format": "semantic_v2",
+  "id": "p487",
+  "node_budget": 300,
+  "omitted": {
+   "budget": 0,
+   "css_hidden": 0,
+   "no_layout": 0,
+   "offscreen": 0,
+   "page_occluded": 0,
+   "unknown": 15,
+   "unprovable_frame": 0
+  },
+  "scope": "viewport",
+  "selected_nodes": 46,
+  "total_nodes": 46
+ },
+ "status": "ok",
+ "tab_id": "tab-ac83d8c1-aa64-4789-8a0b-ca1259920118",
+ "target_id": "bt-eca3a579-49ac-4335-b5d6-3bd6615d3f25"
+}

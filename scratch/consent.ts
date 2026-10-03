@@ -1,0 +1,11 @@
+import { WinDriver } from "../src/driver/win";
+import { perceive } from "../src/perceive";
+import { consentReject } from "../src/agent";
+const d = new WinDriver();
+await d.ensureSession("Mint-3");
+const b = await d.open("Mint-3", { kind: "browser", url: "" });
+const o = await d.observe("Mint-3", b);
+const goal = "Flights from Hong Kong to Tokyo on 20 November Flight options are listed on screen (airline, times and price). Do not enter passenger or payment details.";
+const { items } = perceive(o, goal, 120);
+console.log("title", JSON.stringify(o.title), "items", items.map(i => `${i.role}:${i.text}`).join(" | "));
+console.log("reject ->", consentReject(o, items));

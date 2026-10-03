@@ -1,0 +1,6 @@
+faster-whisper==1.1.1
+huggingface-hub>=0.23,<1.0
+requests>=2.31
+sounddevice==0.5.1
+numpy>=1.26,<3
+pynput==1.7.7

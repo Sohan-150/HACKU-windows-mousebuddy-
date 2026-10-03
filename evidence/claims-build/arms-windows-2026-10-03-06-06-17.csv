@@ -1,0 +1,11 @@
+arm,run,claimed_done,correct_in_db,false_done,seconds,gui_actions,outcome
+naive,1,true,false,true,2.1,6,"said done; database: payee: want 'Lee Siu Ming', got 'Lee Siu MingChan Tai Man'; amount: want '42.00', got '42.00128.50'; date: want '01/10/2026', got '01/10/202630/09/2026'"
+ours,1,true,true,false,5.5,7,"verified"
+naive,2,true,false,true,2.1,6,"said done; database: payee: want 'Lee Siu Ming', got 'Lee Siu MingChan Tai Man'; amount: want '42.00', got '42.00128.50'; date: want '01/10/2026', got '01/10/202630/09/2026'"
+ours,2,true,true,false,4.8,7,"verified"
+naive,3,true,false,true,2.1,6,"said done; database: payee: want 'Lee Siu Ming', got 'Lee Siu MingChan Tai Man'; amount: want '42.00', got '42.00128.50'; date: want '01/10/2026', got '01/10/202630/09/2026'"
+ours,3,true,true,false,4.9,7,"verified"
+naive,4,true,false,true,2,6,"said done; database: payee: want 'Lee Siu Ming', got 'Lee Siu MingChan Tai Man'; amount: want '42.00', got '42.00128.50'; date: want '01/10/2026', got '01/10/202630/09/2026'"
+ours,4,true,true,false,4.8,7,"verified"
+naive,5,true,false,true,2,6,"said done; database: payee: want 'Lee Siu Ming', got 'Lee Siu MingChan Tai Man'; amount: want '42.00', got '42.00128.50'; date: want '01/10/2026', got '01/10/202630/09/2026'"
+ours,5,true,true,false,4.9,7,"verified"

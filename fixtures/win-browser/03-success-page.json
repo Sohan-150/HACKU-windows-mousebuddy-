@@ -1,0 +1,105 @@
+{
+ "content_refs": [
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Claim received",
+   "ref": "p490:1",
+   "role": "rootwebarea",
+   "states": {
+    "focusable": true
+   },
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Claim received",
+   "ref": "p490:2",
+   "role": "heading",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p490:3",
+   "role": "paragraph",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": "Reference #1",
+   "ref": "p490:4",
+   "role": "statictext",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  },
+  {
+   "actions": [],
+   "frame": "main",
+   "name": null,
+   "ref": "p490:5",
+   "role": "paragraph",
+   "states": {},
+   "value": null,
+   "visibility": "in_viewport"
+  }
+ ],
+ "mode": "snapshot",
+ "oopif": {
+  "frames": 0,
+  "status": "attached"
+ },
+ "outline": "- heading \"Claim received\"\n- paragraph\n  - statictext \"Reference #1\"\n- paragraph\n  - link \"Submit another claim\" [focusable=true]",
+ "page": {
+  "title": "Claim received",
+  "url": "http://127.0.0.1:8765/submit"
+ },
+ "refs": [
+  {
+   "actions": [
+    "click",
+    "pointer"
+   ],
+   "frame": "main",
+   "name": "Submit another claim",
+   "ref": "p490:0",
+   "role": "link",
+   "states": {
+    "focusable": true
+   },
+   "value": null,
+   "visibility": "in_viewport"
+  }
+ ],
+ "snapshot": {
+  "complete": true,
+  "continuation": null,
+  "format": "semantic_v2",
+  "id": "p490",
+  "node_budget": 300,
+  "omitted": {
+   "budget": 0,
+   "css_hidden": 0,
+   "no_layout": 0,
+   "offscreen": 0,
+   "page_occluded": 0,
+   "unknown": 0,
+   "unprovable_frame": 0
+  },
+  "scope": "viewport",
+  "selected_nodes": 6,
+  "total_nodes": 6
+ },
+ "status": "ok",
+ "tab_id": "tab-ac83d8c1-aa64-4789-8a0b-ca1259920118",
+ "target_id": "bt-eca3a579-49ac-4335-b5d6-3bd6615d3f25"
+}

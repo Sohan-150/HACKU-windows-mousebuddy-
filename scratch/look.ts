@@ -1,0 +1,12 @@
+import { WinDriver } from "../src/driver/win";
+import { perceive } from "../src/perceive";
+const d = new WinDriver();
+await d.ensureSession("Mint-3");
+const url = process.argv[2];
+const b = await d.open("Mint-3", { kind: "browser", url });
+await Bun.sleep(1500);
+const o = await d.observe("Mint-3", b);
+console.log("TITLE", o.title, "| URL", o.url, "| truncated", o.truncated);
+const { items } = perceive(o, "");
+console.log("ITEMS", items.length); for (const i of items.slice(0, 25)) console.log(" ", i.i, i.role, JSON.stringify(i.text.slice(0, 90)), i.value ?? "");
+console.log("TEXT", o.text.length, "lines"); for (const t of o.text.slice(0, 30)) console.log("  |", t.slice(0, 140));

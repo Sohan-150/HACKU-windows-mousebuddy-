@@ -1,7 +1,9 @@
 // runTask: plan -> for each part: (files: preview, approve, run, check on disk) or (window: open -> steps -> check).
+// Parts that do not use what an earlier part found run at the same time when they need different things (the browser
+// and a desktop app; see lanes.ts); a part that fails does not stop the others.
 // Deciders: TypeSafe jev first for everything it can do; Claude (optional) for planning that rules can't do, writing
 // text nobody planned, steps jev is unsure about, and reading the result. Every task ends "done" with an answer and
-// its evidence, or "failed" with a coded reason.
+// its evidence, "partial" (some parts done, the others with their reasons), or "failed" with a coded reason.
 import type {
   ActSpec, ActionResult, Approver, Check, Decision, Driver, ExceptionCode, HandName, Item, Logger, Observation, Plan, Subtask, Task, WindowRef,
 } from "./contracts";
@@ -10,6 +12,7 @@ import { DriverError } from "./driver/cli";
 import { FileOpError, planFiles, runFiles } from "./files";
 import { createWordDocument, toParagraphs } from "./office";
 import { GATE, Jev, JEV_USD_PER_INPUT_TOKEN, type StepState } from "./jev";
+import { Locks, RESOURCE_HANDS, RESOURCE_NAMES, resourceFor, Stopped } from "./lanes";
 import { perceive, screenText, signature } from "./perceive";
 import { planWithJev, searchUrl } from "./planner";
 import { clickNeedsApproval, personalDetailsMissing, typingForbidden } from "./safety";
@@ -20,6 +23,8 @@ export type JevLike = Pick<Jev, "decide"> & { extra?: Pick<Jev["extra"], "classi
 export interface AgentDeps {
   driver: Driver; claude: ClaudeLike | null; jev: JevLike | null; log: Logger; approve: Approver; signal: AbortSignal;
   hand?: HandName; maxSteps?: number; onStatus?: (s: string) => void;
+  appHand?: HandName;                     // the hand for desktop apps (default Red-7), so they run beside the browser (hand)
+  locks?: Locks;                          // shared by every task of the app; without it, the parts of this task share their own
   conversation?: Turn[];                  // earlier tasks this session, for follow-ups ("book the cheapest one")
   /** Answers a question about the user's screen (point-and-ask), for plans that turn out to be one. */
   askScreen?: (question: string) => Promise<{ answer: string; evidence: string; jevUsd?: number; by?: "claude" | "jev" | "code" }>;
@@ -44,7 +49,6 @@ export async function runTask(input: Task, deps0: AgentDeps): Promise<Task> {
   const deps: AgentDeps = capped ? { ...deps0, claude: null } : deps0;
   if (capped) deps.onStatus?.("Claude's spending cap is reached: jev + rules only until restart");
   const { driver, claude, jev, log } = deps;
-  const hand = deps.hand ?? "Mint-3";
   const task: Task = { ...input, status: "planning", startedAt: now(), counts: { ...input.counts }, cost: { ...input.cost } };
   const claudeAtStart = claude?.usage.usd ?? 0;
   const finish = (t: Task): Task => {
@@ -76,30 +80,104 @@ export async function runTask(input: Task, deps0: AgentDeps): Promise<Task> {
       deps.onStatus?.("idle");
       return finish(task);
     }
-    const notes: string[] = [];
-    let last = { answer: "", evidence: "" };
-    for (let k = 0; k < plan.subtasks.length; k++) {
-      let sub = plan.subtasks[k];
-      if (sub.usePreviousAnswer) sub = withPrevious(sub, notes.at(-1) ?? "");
-      last = sub.surface.kind === "answer" ? await answerPart(task, sub, notes, deps)
-        : sub.surface.kind === "files" ? await runFilesPart(task, k, sub, deps)
-        : sub.surface.kind === "document" ? await runDocumentPart(task, k, sub, notes, deps)
-        : await runWindowPart(task, k, sub, notes, deps, hand);
-      notes.push(last.answer);
+    const parts = await runParts(task, plan, deps);
+    if (parts.some(p => !p.ok && p.code === "stopped")) throw new TaskError("stopped", "stopped by you");
+    const done = parts.filter((p): p is PartDone => p.ok), failed = parts.filter((p): p is PartFailed => !p.ok);
+    if (parts.length === 1 && failed.length) throw new TaskError(failed[0].code, failed[0].reason);
+    if (!failed.length) {
+      task.result = parts.length > 1 ? { answer: done.map(p => p.answer).join(" "), evidence: done[done.length - 1].evidence } : done[0];
+      task.status = "done";
+    } else {
+      // Say what happened to every part, in order: the ones that worked and why the others did not.
+      const lines = parts.map((p, i) => p.ok ? p.answer : `Part ${i + 1} (${shortGoal(plan.subtasks[i])}) didn't work: ${p.reason}`);
+      task.result = { answer: lines.join("\n"), evidence: done.length ? done[done.length - 1].evidence : "" };
+      task.status = done.length ? "partial" : "failed";
+      task.exception = { code: failed[0].code, reason: failed.map(f => f.reason).join(" | ") };
+      if (!done.length) task.result = undefined;
     }
-    task.result = plan.subtasks.length > 1 ? { answer: notes.join(" "), evidence: last.evidence } : last;
-    task.status = "done";
   } catch (e) {
-    const err = e instanceof TaskError ? e
-      : e instanceof ModelError ? new TaskError("model_error", e.message)
-      : e instanceof FileOpError ? new TaskError("needs_info", e.message)
-      : e instanceof DriverError ? new TaskError(e.code === "window_lost" ? "window_lost" : "driver_refused", e.message)
-      : new TaskError("model_error", `unexpected error: ${(e as Error).message ?? e}`);
+    const err = asTaskError(e);
     task.status = err.code === "stopped" ? "stopped" : "failed";
     task.exception = { code: err.code, reason: err.message };
   }
   deps.onStatus?.("idle");
   return finish(task);
+}
+
+function asTaskError(e: unknown): TaskError {
+  return e instanceof TaskError ? e
+    : e instanceof Stopped ? new TaskError("stopped", "stopped by you")
+    : e instanceof ModelError ? new TaskError("model_error", e.message)
+    : e instanceof FileOpError ? new TaskError("needs_info", e.message)
+    : e instanceof DriverError ? new TaskError(e.code === "window_lost" ? "window_lost" : "driver_refused", e.message)
+    : new TaskError("model_error", `unexpected error: ${(e as Error).message ?? e}`);
+}
+
+type PartDone = { ok: true; answer: string; evidence: string };
+type PartFailed = { ok: false; code: ExceptionCode; reason: string };
+type PartOutcome = PartDone | PartFailed;
+
+/** A part uses what earlier parts found (and so waits for them): said so in the plan, or an answer written from them. */
+function needsEarlier(sub: Subtask, k: number): boolean {
+  if (k === 0) return false;
+  return !!sub.usePreviousAnswer || !!sub.needsPrevious || sub.surface.kind === "answer"
+    || (sub.surface.kind === "document" && sub.surface.text.includes("{previous answer}"));
+}
+
+const shortGoal = (sub: Subtask) => {
+  const g = sub.goal.replace(/\s+/g, " ").trim();
+  return g.length > 70 ? `${g.slice(0, 67)}...` : g;
+};
+
+/**
+ * Runs the parts of a plan. Each takes what it needs (the browser, the app hand, Word, the files) for as long as it
+ * runs; parts needing different things run at the same time, parts needing the same thing take turns in plan order.
+ * A part that uses what earlier ones found waits for them, and is skipped if one of them failed.
+ */
+async function runParts(task: Task, plan: Plan, deps: AgentDeps): Promise<PartOutcome[]> {
+  const locks = deps.locks ?? new Locks();
+  const n = plan.subtasks.length;
+  const runs: Promise<PartOutcome>[] = [];
+  for (let k = 0; k < n; k++) {
+    const earlier = needsEarlier(plan.subtasks[k], k) ? runs.slice(0, k) : [];
+    const status = (s: string) => deps.onStatus?.(n > 1 ? `part ${k + 1}: ${s}` : s);
+    const partDeps: AgentDeps = { ...deps, onStatus: status };
+    runs.push((async (): Promise<PartOutcome> => {
+      let release: (() => void) | undefined;
+      try {
+        let notes: string[] = [];
+        if (earlier.length) {
+          const before = await Promise.all(earlier);
+          const bad = before.findIndex(b => !b.ok);
+          if (bad >= 0) {
+            const b = before[bad] as PartFailed;
+            return b.code === "stopped" ? b : { ok: false, code: "needs_info", reason: `skipped: it needs what part ${bad + 1} was to find` };
+          }
+          notes = before.map(b => (b as PartDone).answer);
+        }
+        let sub = plan.subtasks[k];
+        if (sub.usePreviousAnswer) sub = withPrevious(sub, notes.at(-1) ?? "");
+        const res = resourceFor(sub.surface);
+        if (res) {
+          release = await locks.acquire(res, task.instruction, deps.signal, holder =>
+            status(`waiting for ${RESOURCE_NAMES[res]} (in use by "${holder.slice(0, 60)}")`));
+        }
+        if (deps.signal.aborted) throw new Stopped();
+        const r = sub.surface.kind === "answer" ? await answerPart(task, sub, notes, partDeps)
+          : sub.surface.kind === "files" ? await runFilesPart(task, k, sub, partDeps)
+          : sub.surface.kind === "document" ? await runDocumentPart(task, k, sub, notes, partDeps)
+          : await runWindowPart(task, k, sub, notes, partDeps,
+              sub.surface.kind === "app" ? deps.appHand ?? RESOURCE_HANDS.app! : deps.hand ?? RESOURCE_HANDS.browser!);
+        return { ok: true, ...r };
+      } catch (e) {
+        const err = asTaskError(e);
+        return { ok: false, code: err.code, reason: err.message };
+      } finally {
+        release?.();
+      }
+    })());
+  }
+  return Promise.all(runs);
 }
 
 /**
@@ -205,8 +283,11 @@ async function ask(task: Task, deps: AgentDeps, id: string, action: string, why:
 }
 
 // ------------------------------------------------------------------ checks
+/** What the window looked like when the part started: music already playing then is not what was asked for. */
+export interface CheckStart { title?: string; playing?: boolean; query?: string }
+
 /** A check in code (stronger than reading the screen). null = this part has none. */
-export function codeCheck(check: Check | undefined, obs: Observation, items: Item[]): { complete: boolean; answer: string; evidence: string } | null {
+export function codeCheck(check: Check | undefined, obs: Observation, items: Item[], start: CheckStart = {}): { complete: boolean; answer: string; evidence: string } | null {
   if (!check) return null;
   if (check.kind === "display_equals") {
     const re = typeof check.label === "string" ? new RegExp(`^${check.label}`) : check.label;
@@ -216,10 +297,17 @@ export function codeCheck(check: Check | undefined, obs: Observation, items: Ite
     return { complete: ok, answer: `The result is ${line ? line.replace(re, "") : "not shown"}.`, evidence: line ? `${line} (expected ${check.expected})` : `no '${re.source}' text on screen` };
   }
   if (check.kind === "playing") {
+    // Something new is playing when the window changed since the part started (or names what was asked for).
+    const changed = !start.playing || obs.title !== start.title || (!!start.query && wordsMatch(start.query, obs.title));
     // Media players show a Pause button while something plays (YouTube "Pause (k)", Spotify "Pause").
     const pause = obs.elements.find(e => /^(button|other)$/.test(e.role) && /^pause( \(k\))?$/i.test((e.label ?? "").trim()));
-    return pause ? { complete: true, answer: "It's playing.", evidence: `the player shows '${pause.label}'` }
-      : { complete: false, answer: "", evidence: "no Pause button showing, so nothing is playing yet" };
+    if (pause && changed) return { complete: true, answer: "It's playing.", evidence: `the player shows '${pause.label}'` };
+    // Spotify's window title is "Artist - Song" while it plays and "Spotify Premium" / "Spotify Free" when it does not
+    // (its player bar can be beyond the controls the window reports).
+    if (spotifyPlaying(obs) && (obs.title !== start.title || (!!start.query && wordsMatch(start.query, obs.title)))) {
+      return { complete: true, answer: `It's playing: ${obs.title}.`, evidence: `Spotify's window title shows "${obs.title}"` };
+    }
+    return { complete: false, answer: "", evidence: pause ? `the player shows '${pause.label}', but it was already playing before` : "no Pause button showing, so nothing is playing yet" };
   }
   const clean = (s: string) => s.replace(/\r\n?/g, "\n").trim();
   // The full value from the window: items carry a shortened copy (200 characters) for the deciders.
@@ -253,7 +341,8 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
   const facts: string[] = [];              // learned during this part; kept for every later step (history keeps 8)
   const readPages = new Set<string>(), scrolls = new Map<string, number>();
   const mediaTried = new Set<string>();
-  let emptyWaits = 0;
+  let emptyWaits = 0, retriedStuck = false;
+  let start: CheckStart | undefined;          // the window when the part started (for the "playing" check)
 
   for (let step = 1; step <= maxSteps; step++) {
     if (signal.aborted) throw new TaskError("stopped", "stopped by you");
@@ -286,9 +375,10 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
       await Bun.sleep(700); step--; continue;
     }
     emptyWaits = 0;
+    if (!start) start = sub.check?.kind === "playing" ? { title: obs.title, playing: !!codeCheck(sub.check, obs, items)?.complete || spotifyPlaying(obs), query: mediaQuery(sub) } : {};
     // A part with a code check (Calculator display, text read back, a Pause button) is done the moment it passes.
     if (sub.check && step > 1) {
-      const c = codeCheck(sub.check, obs, items);
+      const c = codeCheck(sub.check, obs, items, start);
       if (c?.complete) {
         log.write({ type: "verify", runId: log.runId, t: now(), taskId: task.id, sub: k, complete: true, answer: c.answer, evidence: c.evidence, by: "code", ms: 0 });
         return { answer: c.answer, evidence: c.evidence };
@@ -431,7 +521,7 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
       deps.onStatus?.(`step ${step}: checking the result`);
       const tv = performance.now();
       let v: { complete: boolean; answer: string; evidence: string }, by: "code" | "claude" | "jev";
-      const c = codeCheck(sub.check, obs, items);
+      const c = codeCheck(sub.check, obs, items, start);
       if (c) { v = c; by = "code"; }
       else if (claude) {
         // A web answer is often further down than the screen (a top-10 list): check against the whole page.
@@ -460,11 +550,31 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
       continue;
     }
     if (dec.kind === "stuck") {
+      const why = dec.reason || "the agent could not see a way to reach the goal from this window";
+      // On the web there is usually another way (other dates, a nearby airport or city, another site): one more try.
+      if (w.kind === "browser" && claude && !retriedStuck) {
+        retriedStuck = true;
+        note = "about to give up: trying another way first"; logStep(); actedLast = false;
+        history.push(`was about to stop: ${why.slice(0, 160)}`);
+        facts.push(`It looked impossible once: ${why.slice(0, 200)}. Another way was tried after that.`);
+        forceWhy = `you were about to stop because: ${why.slice(0, 200)}. Try another way once before stopping: change the search (other dates, a nearby airport or city, fewer filters) or open a different site that has it. Choose stuck again only if there is truly no way`;
+        deps.onStatus?.(`step ${step}: that didn't work, trying another way`);
+        continue;
+      }
       logStep();
-      throw new TaskError("needs_info", dec.reason || "the agent could not see a way to reach the goal from this window");
+      throw new TaskError("needs_info", why);
     }
     if (dec.kind === "wait") {
-      waits++; note = "waiting"; logStep(); actedLast = false; await Bun.sleep(1200); continue;
+      waits++;
+      // An app that is downloading, updating or installing can take many minutes: say so and stop instead of waiting
+      // (the user is told what it is doing and the browser / app hand is free for other tasks).
+      const busy = waits >= 3 && w.kind === "app" ? busyLine(obs) : undefined;
+      if (busy) {
+        note = `still busy: ${busy}`; logStep();
+        throw new TaskError("needs_info", `${obs.title} is still busy ("${busy}"). I've stopped waiting so you can do other things; ask me again when it has finished.`);
+      }
+      deps.onStatus?.(`step ${step}: waiting${dec.reason ? ` (${dec.reason.slice(0, 120)})` : " for the window"}`);
+      note = "waiting"; logStep(); actedLast = false; await Bun.sleep(1200); continue;
     }
     waits = 0;
 
@@ -512,7 +622,8 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
       acted = { tool: "click", token: it.token }; describe = `clicked ${it.role} '${it.text}'`;
     } else if (dec.kind === "type") {
       if (!it) { note = "no field chosen"; logStep(); actedLast = false; continue; }
-      if (!TYPEABLE.includes(it.role)) {
+      // A desktop app's search box is often a combo box (Spotify's "What do you want to play?"): it takes typing too.
+      if (!TYPEABLE.includes(it.role) && !(w.kind === "app" && it.role === "pop-up")) {
         note = `cannot type into a ${it.role}`; history.push(`tried to type into ${it.role} '${it.text}' (not a text field)`); logStep(); actedLast = false; continue;
       }
       const secret = typingForbidden(it);
@@ -600,6 +711,19 @@ async function jevVerify(task: Task, sub: Subtask, state: StepState, obs: Observ
 const CONSENT_PAGE = /\b(cookies?|before you continue|consent|privacy choices|your privacy|informasjonskapsler|før du fortsetter|bevor sie fortfahren|avant de continuer|antes de continuar|prima di continuare)\b/i;
 // "Reject all" in the languages a site may pick from the IP address (en, no, sv, da, de, fr, es, it, nl, pt, pl, fi, zh, ja).
 const REJECT = /^(reject all|reject( all)? cookies|decline( all)?|refuse all|only (necessary|essential)( cookies)?|(use )?(strictly )?necessary (cookies )?only|continue without accepting|reject non-essential|avvis alle|avvisa alla|neka alla|afvis alle|alle ablehnen|tout refuser|refuser tout|continuer sans accepter|rechazar todo|rechazar todas|rifiuta tutto|rifiuta tutti|alles afwijzen|alles weigeren|rejeitar tudo|recusar tudo|odrzuć wszystkie|hylkää kaikki|全部拒絕|全部拒绝|拒絕全部|すべて拒否)$/i;
+
+/** Spotify's title while it plays: "Artist - Song" (not "Spotify", "Spotify Premium" or "Spotify Free"). */
+export function spotifyPlaying(obs: Observation): boolean {
+  const t = obs.title.trim();
+  return obs.window.kind === "app" && /spotify/i.test(obs.window.app) && /\S \u2013 \S|\S - \S/.test(t) && !/^spotify\b/i.test(t);
+}
+
+/** A line on screen saying the window is busy for a while: updating, downloading, installing, a percentage. */
+export function busyLine(obs: Observation): string | undefined {
+  const BUSY = /\b(updating|downloading|installing|verifying|preparing|patching|queued|update in progress|download in progress)\b|\b\d{1,3}(?:\.\d+)?\s?%/i;
+  return obs.text.find(l => BUSY.test(l))?.slice(0, 120)
+    ?? obs.elements.map(e => [e.label, e.value].filter(Boolean).join(" ")).find(l => BUSY.test(l))?.slice(0, 120);
+}
 
 /** What to play: the planned search words, else the words in a spotify:search: link or a results URL. */
 export function mediaQuery(sub: Subtask): string {

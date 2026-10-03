@@ -29,7 +29,9 @@ export class SimDriver implements Driver {
   doc = "";                          // the simulated Notepad document
   snap = 0;
   log: ActSpec[] = [];
-  private current: SimControl[] = [];
+  // Like Cua, a newer snapshot makes the older tokens of that window stale; the browser and the app are separate
+  // windows, so parts in both can run at the same time.
+  private current: Record<WindowRef["kind"], { snap: number; controls: SimControl[] }> = { browser: { snap: 0, controls: [] }, app: { snap: 0, controls: [] } };
 
   constructor(private site: Record<string, SimPage> = SITE, private faults: { dropTyping?: boolean } = {}) {}
 
@@ -53,13 +55,10 @@ export class SimDriver implements Driver {
 
   async observe(hand: HandName, w: WindowRef): Promise<Observation> {
     this.snap++;
-    if (w.kind === "app") {
-      this.current = [{ role: "text area", label: "Text editor", value: this.doc }, { role: "button", label: "Save", risky: true }];
-    } else {
-      this.current = this.page().controls;
-    }
-    const elements: Element[] = this.current.map((c, i) => ({
-      index: i, token: `s${this.snap}:${i}`, role: c.role, label: c.label,
+    const controls = w.kind === "app" ? [{ role: "text area", label: "Text editor", value: this.doc }, { role: "button", label: "Save", risky: true }] as SimControl[] : this.page().controls;
+    this.current[w.kind] = { snap: this.snap, controls };
+    const elements: Element[] = controls.map((c, i) => ({
+      index: i, token: `${w.kind}${this.snap}:${i}`, role: c.role, label: c.label,
       value: c.role === "text field" || c.role === "text area" ? (w.kind === "app" ? this.doc : this.values[c.label] ?? "") : undefined, inView: true,
     }));
     const p = this.page();
@@ -72,7 +71,7 @@ export class SimDriver implements Driver {
     const ok: ActionResult = { ok: true, effect: "unverifiable", ms: 1, cli: `sim ${a.tool}` };
     if (a.tool === "navigate") { this.go(a.url); return ok; }
     if (a.tool === "scroll") { this.scrolled = true; return ok; }
-    const c = "token" in a && a.token ? this.control(a.token) : undefined;
+    const c = "token" in a && a.token ? this.control(w.kind, a.token) : undefined;
     if ("token" in a && a.token && !c) return { ...ok, ok: false, error: { code: "stale", hint: "token from an older snapshot" } };
     if (a.tool === "type") {
       if (this.faults.dropTyping) return ok;
@@ -91,8 +90,8 @@ export class SimDriver implements Driver {
     return ok;
   }
 
-  private control(token: string): SimControl | undefined {
-    const [snap, i] = token.split(":");
-    return snap === `s${this.snap}` ? this.current[Number(i)] : undefined;
+  private control(kind: WindowRef["kind"], token: string): SimControl | undefined {
+    const [snap, i] = token.split(":"), cur = this.current[kind];
+    return snap === `${kind}${cur.snap}` ? cur.controls[Number(i)] : undefined;
   }
 }

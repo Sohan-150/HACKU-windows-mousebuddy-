@@ -25,7 +25,7 @@ export type FileOp =
   | { op: "move" | "copy"; folder: string; match: FileMatch; dest: string }
   | { op: "convert"; folder: string; match: FileMatch; to: string }
   | { op: "list"; folder: string; match: FileMatch }
-  | { op: "find"; folder: string; name: string; want: "folder" | "file" | "any"; open: boolean }   // "where is my Year 1 folder"
+  | { op: "find"; folder: string; name: string; want: "folder" | "file" | "any"; open: boolean; list?: boolean }   // "where is my Year 1 folder"; list: say what is in it
   | { op: "write"; path: string; text: string };
 
 /** A check done in code when the part ends: stronger than reading the screen. */
@@ -121,6 +121,7 @@ export interface Subtask {
   question?: boolean;                // the user asked for information: the answer must be read off the screen
   check?: Check;                     // code check before the part counts as done
   usePreviousAnswer?: boolean;       // the text to type is the answer of the previous part
+  needsPrevious?: boolean;           // uses what earlier parts found, so it waits for them (independent parts run at the same time)
 }
 export interface Plan {
   subtasks: Subtask[]; question: string; by: "claude" | "jev+rules";
@@ -133,7 +134,7 @@ export type ExceptionCode =
 
 export interface Task {
   id: string; instruction: string; source: "typed" | "voice";
-  status: "queued" | "planning" | "running" | "done" | "failed" | "stopped";
+  status: "queued" | "planning" | "running" | "done" | "partial" | "failed" | "stopped";   // partial: some parts done, some failed
   plan?: Plan;
   result?: { answer: string; evidence: string };                        // checked by a second reading of the screen
   exception?: { code: ExceptionCode; reason: string };

@@ -9,9 +9,14 @@ import { isScreenQuestion } from "./pointer";
 
 export class PlanError extends Error {}
 
-/** "find X then write it in Notepad" -> two parts. Only explicit sequencing words split, so "eggs, milk and bread" stays whole. */
+/**
+ * "find X then write it in Notepad" -> two parts. Only explicit sequencing words split ("then", "at the same time",
+ * "and also", a new sentence after . ? !), so "eggs, milk and bread" stays whole.
+ */
 export function splitParts(instruction: string): string[] {
-  return instruction.split(/\s*(?:,?\s*\band then\b|,?\s*\bthen\b|;\s*|\.\s+(?=[A-Z]))\s*/i).map(s => s.trim().replace(/[.!]+$/, "")).filter(Boolean);
+  return instruction
+    .split(/\s*(?:,?\s*\band then\b|,?\s*\bthen\b|,?\s*\b(?:and\s+)?(?:at the same time|meanwhile|while you'?re at it)\b,?|,?\s*\band also\b,?|;\s*|[.?!]\s+(?=[A-Z]))\s*/i)
+    .map(s => s.trim().replace(/[.!?]+$/, "")).filter(Boolean);
 }
 
 const IMPERATIVE = /^(please\s+|can you\s+|could you\s+)*(find out|look up|search( the web| online)? for|google|tell me|find|check|i want to know|let me know)\s+/i;
@@ -236,7 +241,12 @@ export function looksLikeFind(part: string): boolean {
 
 /** A read-only search by name: the whole user folder, or the known folder named after "in" ("in Documents"). */
 export function findOp(part: string, home = homedir()): FileOp {
-  let name = part.trim().replace(/[?.!]+$/, "")
+  const text = part.trim().replace(/[?.!]+$/, "");
+  // "... and tell me what is inside", "... and open it": what to do once it is found, not part of the name.
+  const open = /^(?:please\s+|can you\s+|could you\s+)*(?:open|show)\b/i.test(text) || /\band (?:open|show) it\b/i.test(text);
+  const list = /\b(?:what(?:'s| is)? (?:inside|in it|in there)|contents?|list (?:it|them|what))\b/i.test(text);
+  let name = text
+    .replace(/\s+(?:and|then)\s+(?:tell|show|open|list|say|read|give)\b.*$/i, "")
     .replace(/^(?:please\s+|can you\s+|could you\s+)*(?:tell me\s+)?(?:where(?:'s|\s+is|\s+are|\s+did i (?:put|save))|find(?: me)?|locate|look for|search for|open|show(?: me)?)\s+/i, "")
     .replace(/\s+(?:on|in) (?:my |this )?(?:computer|pc|laptop)$/i, "").trim();
   const inFolder = name.match(/\s+(?:in|on|inside|under)\s+(?:my\s+|the\s+)?((?:desktop|downloads?|documents|pictures|photos|music|videos)(?:[\\/][\w.-]+)*)(?:\s+folder)?$/i);
@@ -245,7 +255,7 @@ export function findOp(part: string, home = homedir()): FileOp {
     throw new PlanError("Which file or folder should I look for? Say its name, for example 'where is my Year 1 folder'.");
   }
   const want = /\b(folder|directory)\b/i.test(name) ? "folder" as const : /\.\w{2,4}\b|\b(file|document|pdf|photo|picture|spreadsheet|essay)\b/i.test(name) ? "file" as const : "any" as const;
-  return { op: "find", folder: inFolder ? resolveFolder(inFolder[1], home) : home, name, want, open: /^(?:please\s+)?(?:open|show)\b/i.test(part.trim()) };
+  return { op: "find", folder: inFolder ? resolveFolder(inFolder[1], home) : home, name, want, open, ...(list ? { list } : {}) };
 }
 
 export function fileOp(kind: FileOpKind, part: string, home = homedir()): FileOp {

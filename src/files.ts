@@ -37,6 +37,20 @@ function files(folder: string, m?: FileMatch): string[] {
     .map(n => join(folder, n));
 }
 
+/** "Inside it: 2 folders (Labs, Notes) and 3 files (a.py, b.py, c.txt)." Read-only. */
+export function contents(folder: string, max = 15): string {
+  let entries;
+  try { entries = readdirSync(folder, { withFileTypes: true }).filter(d => !d.name.startsWith(".") && !SKIP.test(d.name)); }
+  catch { return "I couldn't read what is inside it."; }
+  if (!entries.length) return "It's empty.";
+  const dirs = entries.filter(d => d.isDirectory()).map(d => d.name).sort((a, b) => a.localeCompare(b));
+  const fls = entries.filter(d => !d.isDirectory()).map(d => d.name).sort((a, b) => a.localeCompare(b));
+  const list = (names: string[], n: number) => `${names.slice(0, n).join(", ")}${names.length > n ? `, and ${names.length - n} more` : ""}`;
+  const nd = Math.min(dirs.length, Math.ceil(max / 2)), nf = Math.max(max - nd, 0);
+  const parts = [dirs.length ? `${dirs.length} folder${dirs.length > 1 ? "s" : ""} (${list(dirs, nd)})` : "", fls.length ? `${fls.length} file${fls.length > 1 ? "s" : ""} (${list(fls, nf)})` : ""].filter(Boolean);
+  return `Inside it: ${parts.join(" and ")}.`;
+}
+
 /** A free name: "a.pdf" -> "a (1).pdf" if taken (also by an earlier action in the same plan). */
 function freeName(path: string, taken: Set<string>): string {
   let p = path, i = 1;
@@ -69,9 +83,10 @@ export function planFiles(op: FileOp, home = homedir()): FilePlan {
     }
     const best = hits[0];
     const more = hits.length > 1 ? ` Also found: ${hits.slice(1, 4).map(h => h.path).join("; ")}.` : "";
+    const inside = op.list && best.isDir ? ` ${contents(best.path)}` : "";
     return {
       actions: op.open ? [{ kind: "open", path: best.path }] : [], needsApproval: false, summary: `found ${hits.length}`,
-      answer: `Your ${best.isDir ? "folder" : "file"} "${basename(best.path)}" is in ${dirname(best.path)}.${op.open ? " I've opened it in File Explorer." : ""}${more}`,
+      answer: `Your ${best.isDir ? "folder" : "file"} "${basename(best.path)}" is in ${dirname(best.path)}.${op.open ? " I've opened it in File Explorer." : ""}${inside}${more}`,
     };
   }
   if (op.op === "list") {

@@ -1,4 +1,7 @@
-// Panel server: SSE /events; tasks (typed or spoken) run one at a time; approvals; stop; past runs.
+// Panel server: SSE /events; tasks (typed or spoken); approvals; stop; past runs.
+// Tasks start at once and share the computer: each part takes what it needs (the agent's browser, the desktop-app
+// hand, Word, the files; see lanes.ts), so a web task runs while an app task waits on a download, and a task that needs
+// something in use waits its turn (the bubble says what it is waiting for).
 // Voice (hold the push-to-talk keys, speak, release):
 //   a question about the screen ("what is this?", "what am I looking at?", "circle the zebra", "where is save?"), or
 //   with Claude a how-to question ("how do I make a pivot table?") -> answered at once from the window under the
@@ -14,8 +17,9 @@ import type { Claude, Turn } from "./claude";
 import type { ApprovalRequest, Driver, FileAction, HandName, LogLine, Task } from "./contracts";
 import type { VoiceEvent } from "./intake";
 import { undoMoves } from "./files";
+import { Locks } from "./lanes";
 import { JsonlLogger, newRunId, RUNS_DIR } from "./logger";
-import { hideBubble, showBubble } from "./overlay";
+import { hideBubble, onBubbleClosed, showBubble } from "./overlay";
 import { cursorNow, isScreenQuestion, isTeachQuestion, lookAt, lookBehindPanel, pointAt, type PointerContext } from "./pointer";
 import { speak, stopSpeaking } from "./speak";
 
@@ -35,10 +39,14 @@ const PANEL_TITLE = /^Background Agent\b/;    // the panel's browser window (vie
 const STOP_WORDS = /^(stop|cancel|stop it|stop that|never ?mind|abort)[.!]*$/i;
 const YES = /^(yes|yeah|yep|approve|approved|go ahead|do it|ok(ay)?|sure)\b/i, NO = /^(no|nope|deny|denied|don'?t|do not)\b/i;
 
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+// Progress lines worth showing on the screen (the panel shows every status).
+const NOISE = /(?:reading the window|deciding|^idle)$/;
+
 export class App {
   tasks: Task[] = [];
-  running?: Task;
-  abort?: AbortController;
+  running = new Map<string, { task: Task; abort: AbortController }>();
+  locks = new Locks();                 // the browser, the app hand, Word, the files: shared by every task
   approvals = new Map<string, { req: ApprovalRequest; resolve: (ok: boolean) => void; timer: Timer }>();
   notices: { level: string; text: string }[] = [];
   voiceInfo = "voice off";
@@ -50,17 +58,26 @@ export class App {
   private prefetch?: Promise<{ at: Point; ctx: PointerContext } | null>;
   private listening = false;           // between key down and the transcript: voice errors then go in the bubble
   private listenTimer?: Timer;
+  private progress = new Map<string, Map<string, string>>();    // task -> part ("" for one part) -> what it is doing
+  private recent: { text: string; until: number }[] = [];       // results of tasks that ended while others still run
+  private bubbleTimer?: Timer;
+  private heldUntil = 0;               // an answer or "Thinking…" the user should read keeps progress off the bubble until then
+  private progressMuted = false;       // the user clicked the progress bubble away: quiet until a task starts or ends
   private clients = new Set<(e: AppEvent) => void>();
 
-  constructor(public driver: Driver, public claude: AppClaude | null, public jev: AppJev | null, public hand: HandName = "Mint-3") {}
+  constructor(public driver: Driver, public claude: AppClaude | null, public jev: AppJev | null, public hand: HandName = "Mint-3") {
+    onBubbleClosed(() => { if (this.running.size) this.progressMuted = true; });
+  }
 
   snapshot() {
     return {
-      tasks: this.tasks.slice(-30), running: this.running?.id ?? null, approvals: [...this.approvals.values()].map(a => a.req),
+      tasks: this.tasks.slice(-30), running: [...this.running.keys()], approvals: [...this.approvals.values()].map(a => a.req),
+      progress: Object.fromEntries([...this.progress].map(([id, parts]) => [id, [...parts].map(([part, text]) => part ? `${part}: ${text}` : text).join("\n")])),
       deciders: { jev: !!this.jev, claude: !!this.claude }, driver: this.driver.caps.name, notices: this.notices.slice(-4),
       voice: this.voiceInfo, voiceMode: this.voiceMode, draft: this.draft, canUndo: !!this.lastMoves,
     };
   }
+  get busy(): boolean { return this.running.size > 0; }
   emit(e: AppEvent) { for (const f of this.clients) f(e); }
   pushState() { this.emit({ type: "state", state: this.snapshot() }); }
   notice(level: "info" | "warn" | "error", text: string) { this.notices.push({ level, text }); this.pushState(); }
@@ -81,10 +98,11 @@ export class App {
       // Look at the window under the pointer while the speech is being transcribed (both take ~1-3 s).
       this.prefetch = this.lookUnderPointer();
       showBubble("Thinking…", { title: "Got it", ms: 20_000 });
+      this.hold(5000);
     } else if (v.event === "cancel") {
       clearTimeout(this.listenTimer);
       this.listening = false;
-      hideBubble();
+      if (this.running.size) this.refreshBubble(0); else hideBubble();
     } else if (v.event === "transcript" && v.text.trim()) {
       this.listening = false;
       void this.onSpoken(v.text.trim());
@@ -125,12 +143,15 @@ export class App {
     const pre = this.prefetch;
     this.prefetch = undefined;
     const pending = [...this.approvals.values()];
-    if (STOP_WORDS.test(text)) { this.stop(); speak("Stopped."); showBubble("Stopped.", { title: "Agent", ms: 2500 }); return discard(pre); }
-    if (pending.length === 1 && (YES.test(text) || NO.test(text))) {
-      const ok = YES.test(text);
-      this.answer(pending[0].req.id, ok);
-      speak(ok ? "Okay." : "Okay, I won't.");
-      showBubble(ok ? "Okay." : "Okay, I won't.", { title: "Agent", ms: 2500 });
+    if (STOP_WORDS.test(text)) { this.stop(); speak("Stopped."); showBubble("Stopped.", { title: "Agent", ms: 2500 }); this.hold(2500); return discard(pre); }
+    if (pending.length && (YES.test(text) || NO.test(text))) {
+      // The oldest question first (several tasks can be waiting for an okay).
+      const ok = YES.test(text), req = pending[0].req;
+      this.answer(req.id, ok);
+      const said = ok ? (pending.length > 1 ? `Okay: ${req.action}.` : "Okay.") : (pending.length > 1 ? `Okay, I won't: ${req.action}.` : "Okay, I won't.");
+      speak(said);
+      showBubble(said, { title: "Agent", ms: 2500 });
+      this.hold(2500);
       return discard(pre);
     }
     if (this.isScreenAsk(text)) {
@@ -197,6 +218,7 @@ export class App {
       : await lookBehindPanel(POINTER_HAND, PANEL_TITLE, { screenshot: !!claude }));
     const r = await askScreen(question, at ?? { x: p.x, y: p.y, t: p.t }, { hand: POINTER_HAND, claude, jev: this.jev, conversation: this.turns.slice(-5) }, p);
     showBubble(r.answer, { at: at && !r.marked.length ? at : null, title: "Answer" });
+    this.hold(Math.min(25_000, 5000 + r.answer.length * 55));
     const evidence = `${at ? `pointer at ${at.x},${at.y}` : "typed: the window behind the panel"}${r.window ? ` in "${r.window}"` : ""}${at && r.element ? ` on ${r.element}` : ""}; answered by ${r.by}${r.marked.length ? `; marked ${r.marked.join(", ")}` : ""}${r.pointedAt ? `; moved my cursor to ${r.pointedAt}` : ""}`;
     return { ...r, evidence };
   }
@@ -212,17 +234,16 @@ export class App {
     this.tasks.push(t);
     if (source === "voice" || instruction === this.draft) this.draft = "";
     this.pushState();
-    void this.pump();
+    void this.start(t);
     return t;
   }
 
-  /** Runs queued tasks one at a time. */
-  private async pump() {
-    if (this.running) return;
-    const next = this.tasks.find(t => t.status === "queued");
-    if (!next) return;
-    this.running = next;
-    this.abort = new AbortController();
+  /** Runs a task now, beside any others; its parts wait their turn for whatever another task is using. */
+  private async start(next: Task) {
+    const abort = new AbortController();
+    this.running.set(next.id, { task: next, abort });
+    this.progress.set(next.id, new Map());
+    this.progressMuted = false;
     const log = new JsonlLogger(newRunId(), new Set([(l: LogLine) => {
       if (l.type === "files" && l.actions.some(a => a.kind === "move")) this.lastMoves = { taskId: l.taskId, actions: l.actions };
       this.emit(l);
@@ -230,12 +251,11 @@ export class App {
     const upd = (t: Task) => { const i = this.tasks.findIndex(x => x.id === t.id); if (i >= 0) this.tasks[i] = t; };
     next.status = "planning";
     this.pushState();
-    if (next.source === "voice") showBubble(next.instruction, { title: "On it", ms: 8000 });
     try {
       const done = await runTask(next, {
-        driver: this.driver, claude: this.claude, jev: this.jev, log, signal: this.abort.signal, hand: this.hand,
+        driver: this.driver, claude: this.claude, jev: this.jev, log, signal: abort.signal, hand: this.hand, locks: this.locks,
         approve: req => this.ask(req),
-        onStatus: text => this.emit({ type: "status", text }),
+        onStatus: text => this.onProgress(next, text),
         conversation: this.turns.slice(-5),
         // A plan that turns out to be about the screen: a spoken one is about where the pointer is now, a typed one
         // about the window behind the panel. The answer is shown (bubble, marks) here; the task records it.
@@ -247,25 +267,74 @@ export class App {
         },
       });
       upd(done);
-      if (done.status === "done" && done.result) this.turns.push({ instruction: done.instruction, answer: done.result.answer });
-      const told = done.status === "done" ? done.result?.answer || "Done."
+      if ((done.status === "done" || done.status === "partial") && done.result) this.turns.push({ instruction: done.instruction, answer: done.result.answer });
+      const told = done.status === "done" || done.status === "partial" ? done.result?.answer || "Done."
         : done.exception?.code === "needs_info" ? done.exception.reason
         : done.status === "stopped" ? "" : `I couldn't finish that. ${done.exception?.reason ?? ""}`;
       if (done.source === "voice") speak(told);
       // On screen for every task (a typed one may finish while the user is in another window). A screen question's
       // answer is already in the bubble, next to what it is about.
       if (told && !done.plan?.aboutScreen) {
-        showBubble(told, { title: done.status === "done" ? "Done" : done.exception?.code === "needs_info" ? "I need to know" : "Couldn't finish" });
+        const title = done.status === "done" ? "Done" : done.status === "partial" ? "Partly done" : done.exception?.code === "needs_info" ? "I need to know" : "Couldn't finish";
+        this.running.delete(next.id);
+        if (this.running.size) {
+          // Others still run: the result stays in the progress bubble for a while, under them.
+          this.recent.push({ text: `${title === "Done" ? "✓" : "•"} ${title}: ${clip(told.replace(/\s+/g, " "), 220)}`, until: Date.now() + 25_000 });
+          this.progressMuted = false;
+          this.refreshBubble(0);
+        } else {
+          // The last one to finish: with the results of any that finished just before it.
+          const recent = this.recent.filter(r => r.until > Date.now()).map(r => r.text);
+          this.recent = [];
+          showBubble(recent.length ? [told, ...recent].join("\n") : told, { title });
+        }
       }
     } catch (e) {
       upd({ ...next, status: "failed", exception: { code: "model_error", reason: (e as Error).message } });
     } finally {
-      this.running = undefined;
-      for (const [, a] of this.approvals) { clearTimeout(a.timer); a.resolve(false); }
-      this.approvals.clear();
+      this.running.delete(next.id);
+      this.progress.delete(next.id);
+      for (const [id, a] of this.approvals) {
+        if (a.req.taskId !== next.id) continue;
+        clearTimeout(a.timer); this.approvals.delete(id); a.resolve(false);
+      }
       this.pushState();
-      void this.pump();
     }
+  }
+
+  /** A task's status: to the panel, to the task's progress lines, and (throttled) to the bubble. */
+  private onProgress(t: Task, text: string) {
+    this.emit({ type: "status", text: this.running.size > 1 ? `${clip(t.instruction, 40)}: ${text}` : text });
+    const parts = this.progress.get(t.id);
+    if (!parts || NOISE.test(text)) return;
+    if (t.status === "planning" && text !== "planning") t.status = "running";
+    const m = text.match(/^(part \d+): (.*)$/);
+    parts.set(m ? m[1] : "", m ? m[2] : text);
+    this.pushState();
+    this.refreshBubble();
+  }
+
+  /** Keeps a bubble the user should read (an answer, "Thinking…") on screen for `ms` before progress replaces it. */
+  private hold(ms: number) { this.heldUntil = Math.max(this.heldUntil, Date.now() + ms); }
+
+  private refreshBubble(delay = 800) {
+    if (this.bubbleTimer) return;
+    this.bubbleTimer = setTimeout(() => { this.bubbleTimer = undefined; this.showProgress(); }, delay);
+  }
+
+  /** What every running task is doing (each part of one doing several things at once), and what just finished. */
+  private showProgress() {
+    if (!this.running.size || this.listening || this.approvals.size || this.progressMuted) return;     // those own the bubble for now
+    const wait = this.heldUntil - Date.now();
+    if (wait > 0) { this.refreshBubble(wait + 50); return; }
+    const now = Date.now();
+    this.recent = this.recent.filter(r => r.until > now);
+    const lines = [...this.running.values()].map(({ task }) => {
+      const parts = [...(this.progress.get(task.id) ?? new Map<string, string>())];
+      const doing = parts.length ? parts.map(([part, text]) => `   ${part ? `${part}: ` : ""}${clip(text, 110)}`).join("\n") : "   starting";
+      return `▶ ${clip(task.instruction, 70)}\n${doing}`;
+    });
+    showBubble([...lines, ...this.recent.map(r => r.text)].join("\n"), { title: this.running.size > 1 ? `Working on ${this.running.size} tasks` : "Working on it", ms: 30_000 });
   }
 
   private ask(req: ApprovalRequest): Promise<boolean> {
@@ -273,11 +342,12 @@ export class App {
       const timer = setTimeout(() => this.answer(req.id, false), APPROVAL_TIMEOUT_MS);
       this.approvals.set(req.id, { req, resolve, timer });
       this.pushState();
-      const voice = this.running?.source === "voice";
+      const run = this.running.get(req.taskId);
+      const voice = run?.task.source === "voice";
       if (voice) speak(`I need your okay to ${req.action}. Hold the talk keys and say yes or no, or use the panel.`);
       showBubble(`${req.action}\n${req.why}\n\nApprove or deny on the panel${voice ? ", or hold the talk keys and say yes or no" : ""}.`, { title: "Needs your okay", ms: APPROVAL_TIMEOUT_MS });
       // A stop cancels the pending approval too.
-      this.abort?.signal.addEventListener("abort", () => this.answer(req.id, false), { once: true });
+      run?.abort.signal.addEventListener("abort", () => this.answer(req.id, false), { once: true });
     });
   }
 
@@ -287,19 +357,20 @@ export class App {
     clearTimeout(a.timer);
     this.approvals.delete(id);
     a.resolve(ok);
-    if (!this.approvals.size) hideBubble();
+    if (!this.approvals.size) { if (this.running.size) this.refreshBubble(0); else hideBubble(); }
     this.pushState();
     return true;
   }
 
-  stop() {
-    this.abort?.abort();
-    for (const t of this.tasks) if (t.status === "queued") t.status = "stopped";
+  /** Stops one task, or every running task. */
+  stop(taskId?: string) {
+    for (const [id, r] of this.running) if (!taskId || id === taskId) r.abort.abort();
+    for (const t of this.tasks) if (t.status === "queued" && (!taskId || t.id === taskId)) t.status = "stopped";
     this.pushState();
   }
 
   clear() {
-    this.tasks = this.tasks.filter(t => t === this.running);
+    this.tasks = this.tasks.filter(t => this.running.has(t.id));
     this.notices = this.notices.filter(n => n.level === "error");
     this.pushState();
   }
@@ -346,10 +417,10 @@ export class App {
         }
         let m: RegExpMatchArray | null;
         if (req.method === "POST" && (m = p.match(/^\/api\/approvals\/([\w-]+)$/))) return json({ ok: this.answer(m[1], body.approve === true) });
-        if (req.method === "POST" && p === "/api/stop") { this.stop(); return json({ ok: true }); }
+        if (req.method === "POST" && p === "/api/stop") { this.stop(typeof body.taskId === "string" ? body.taskId : undefined); return json({ ok: true }); }
         if (req.method === "POST" && p === "/api/clear") { this.clear(); return json({ ok: true }); }
         if (req.method === "POST" && p === "/api/undo-moves") {
-          if (!this.lastMoves || this.running) return json({ ok: false, error: this.running ? "a task is running" : "nothing to undo" }, 400);
+          if (!this.lastMoves || this.running.size) return json({ ok: false, error: this.running.size ? "a task is running" : "nothing to undo" }, 400);
           const res = undoMoves(this.lastMoves.actions);
           this.lastMoves = null;
           const bad = res.filter(r => !r.ok);

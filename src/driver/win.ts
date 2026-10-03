@@ -206,7 +206,9 @@ export class WinDriver implements Driver {
       if (err) throw new DriverError(err.code, err.hint);
       return browserObservation(r.data, w, hand, r.ms);
     }
-    const r = await cuaCall("get_window_state", { session: hand, pid: w.pid, window_id: w.windowId, include_screenshot: false, timeout_ms: 4000 });
+    // Apps built on a web view (Spotify, Teams) report hundreds of controls; without a higher cap the ones at the end
+    // (Spotify's player bar with its Pause button) are cut off. perceive() still keeps at most 120 for the deciders.
+    const r = await cuaCall("get_window_state", { session: hand, pid: w.pid, window_id: w.windowId, include_screenshot: false, timeout_ms: 4000, max_elements: 1000 }, 15_000);
     const err = errorOf(r.data);
     if (err) throw new DriverError(err.code, err.hint);
     return appObservation(r.data, w, hand, r.ms);

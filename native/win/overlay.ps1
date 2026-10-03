@@ -4,7 +4,7 @@
 #   {"cmd":"mark","shape":"ring","x":..,"y":..,"w":..,"h":..,"label":"zebra","color":0,"ms":6000}
 #   {"cmd":"bubble","text":"...","title":"Answer","x":..,"y":..,"ms":9000}      (x,y = pointer; -1 = bottom right)
 #   {"cmd":"hide"}
-# Exits when stdin closes.
+# Writes "bubble-closed" on stdout when the user clicks the bubble away. Exits when stdin closes.
 $ErrorActionPreference = "Stop"
 Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions -TypeDefinition @"
 using System;
@@ -109,7 +109,8 @@ public class Bubble : OverlayForm {
         Invalidate();
     }
     [DllImport("gdi32.dll")] static extern IntPtr CreateRoundRectRgn(int a, int b, int c, int d, int e, int f);
-    protected override void OnClick(EventArgs e) { Close(); }
+    // Tells the agent the user closed it, so progress updates do not bring it straight back.
+    protected override void OnClick(EventArgs e) { try { Console.Out.WriteLine("bubble-closed"); Console.Out.Flush(); } catch { } Close(); }
     protected override void OnPaint(PaintEventArgs e) {
         var g = e.Graphics;
         using (var accent = new SolidBrush(Palette.Of(0))) g.FillRectangle(accent, 0, 0, 5, Height);

@@ -43,6 +43,7 @@ export interface ExplainResult {
   usd: number; jevTokens: number; ms: number;
   app?: string; window?: string; error?: string;
   typed?: boolean; cursor?: Point;   // what it looked at: the window behind the panel, or the screen under this pointer
+  handoff?: boolean;                 // it was a job after all: nothing was said or drawn, the agents should do it
 }
 export type OverlaySend = (m: { cmd: string; [k: string]: unknown }) => boolean;
 
@@ -161,6 +162,11 @@ export class Explainer {
       }
       this.status("thinking…");
       const r = await this.think(q, cap);
+      if (r.answer.task) {
+        this.deps.send({ cmd: "idle" });
+        out.handoff = true; out.by = "claude"; out.answer = "a job for the agents";
+        return finish();
+      }
       const steps = r.answer.steps.filter(s => s.say?.trim()).slice(0, 6).map(s => ({ say: s.say.trim(), shapes: (s.shapes ?? []).slice(0, 4).flatMap(m => place(m, cap)) }));
       if (!steps.length) return this.fail(out, "Sorry, I don't have an answer for that.", finish);
       this.lesson = { question: q, steps, index: 0 };

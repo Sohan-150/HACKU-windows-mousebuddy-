@@ -23,9 +23,9 @@ import { JEV_USD_PER_INPUT_TOKEN } from "./jev";
 import { Locks } from "./lanes";
 import { JsonlLogger, newRunId, RUNS_DIR } from "./logger";
 import { send as overlaySend, type OverlayEvent } from "./overlay";
-import { cursorNow, isScreenQuestion } from "./pointer";
+import { cursorNow } from "./pointer";
 import { spokenSummary, tidyAnswer } from "./results";
-import { route } from "./router";
+import { codeRoute, route } from "./router";
 import { speak, stopSpeaking } from "./speak";
 import type { Voice } from "./voice";
 
@@ -84,7 +84,7 @@ export class App {
     });
     this.behind = opts.behindPanel ?? (async () => { await this.driver.ensureSession(POINTER_HAND).catch(() => {}); return behindPanel(POINTER_HAND, PANEL_TITLE); });
     // every press or text insert flashes in the agent's colour where it happened (fast-lane actions have no Cua cursor)
-    this.driver.onAction = n => { this.send({ cmd: "tap", colour: AGENT_COLOURS[n.hand] ?? "#2bb39a", kind: n.kind, via: n.via, ...n.frame }); };
+    this.driver.onAction = n => { this.send({ cmd: "tap", colour: AGENT_COLOURS[n.hand] ?? "#2bb39a", kind: n.kind, via: n.via, pid: n.pid ?? 0, ...n.frame }); };
   }
 
   get desktop(): boolean { return this.driver.caps.platform !== "sim"; }
@@ -176,7 +176,11 @@ export class App {
     if (r.to === "explain") {
       // "next", "repeat", "never mind": the lesson and the drawings, no screen needed
       if (this.explainer.inCode(q)) { await this.explainer.ask(q, cursor); return; }
-      if (this.desktop) { await this.startExplain(q, source, cursor).done; return; }
+      if (this.desktop) {
+        const t = await this.startExplain(q, source, cursor).done;
+        if (!t.result?.handoff) return;
+        // explain mode saw it was a job after all: the agents do it
+      }
       // the simulator has no screen to look at: a task like any other
     }
     this.explainer.discard();
@@ -208,6 +212,13 @@ export class App {
     const log = new JsonlLogger(newRunId(), new Set([(l: LogLine) => this.emit(l)]));
     const r = await this.explainer.ask(t.instruction, cursor, { capture });
     const evidence = explainEvidence(r);
+    if (r.handoff) {
+      // not a question after all: this record goes, and the job runs as a task (the caller starts it)
+      this.tasks = this.tasks.filter(x => x !== t);
+      t.result = { answer: "", evidence, handoff: true };
+      this.pushState();
+      return t;
+    }
     if (r.error) {
       t.status = "failed";
       t.exception = { code: "driver_refused", reason: r.answer };
@@ -232,9 +243,12 @@ export class App {
     // A screen question typed in the panel ("what am I looking at?", "circle the zebra") is answered from the window
     // behind the panel, not planned as a task. (Typed how-to questions stay with the planner: "how do I renew my
     // passport" needs no screenshot.)
-    if (this.desktop && source === "typed" && isScreenQuestion(instruction)) {
+    if (this.desktop && source === "typed" && codeRoute(instruction, { lesson: false, agentsBusy: false }) === "explain" && !this.explainer.inCode(instruction)) {
       if (instruction === this.draft) this.draft = "";
-      return this.startExplain(instruction, source, undefined, this.behind()).task;
+      const ask = this.startExplain(instruction, source, undefined, this.behind());
+      // explain mode saw it was a job after all: the agents do it
+      void ask.done.then(t => { if (t.result?.handoff) this.addTask(instruction, source); });
+      return ask.task;
     }
     return this.addTask(instruction, source);
   }

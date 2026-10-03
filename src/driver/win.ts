@@ -2,7 +2,7 @@
 //  - browser: the agent's own Chrome/Edge with a throwaway profile (browser route: get_browser_state / browser_type / browser_click)
 //  - app:     any desktop app through UI Automation (get_window_state / click / set_value / type_text / press_key)
 // Measured on this laptop (evidence/): another app stayed in front during every action on both surfaces.
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { HANDS, type ActionNote, type ActSpec, type ActionResult, type Driver, type DriverCaps, type Element, type HandName, type Observation, type WindowSurface, type WindowRef } from "../contracts";
@@ -188,9 +188,20 @@ export class WinDriver implements Driver {
     if (!this.apps) await this.listApps().catch(() => {});
     const info = this.launchInfo.get(lc(app));
     const how = info?.aumid ? { aumid: info.aumid } : info?.path ? { launch_path: info.path } : { name: app };
-    const la = await cuaCall("launch_app", { session: hand, ...how }, 30_000);
-    const lerr = errorOf(la.data);
-    if (lerr) throw new DriverError(lerr.code, `could not start '${app}': ${lerr.hint ?? ""}`);
+    let la = await cuaCall("launch_app", { session: hand, ...how }, 30_000);
+    let lerr = errorOf(la.data);
+    // A broken packaged entry ("does not support the contract specified", seen with VS Code): try the name, then the
+    // app's Start Menu or desktop shortcut, the way a person would start it.
+    if (lerr && !("name" in how)) {
+      const byName = await cuaCall("launch_app", { session: hand, name: app }, 30_000);
+      if (!errorOf(byName.data)) { la = byName; lerr = undefined; }
+    }
+    if (lerr) {
+      const lnk = findShortcut(app);
+      if (!lnk) throw new DriverError(lerr.code, `could not start '${app}': ${lerr.hint ?? ""}`);
+      Bun.spawn(["explorer.exe", lnk], { stdout: "ignore", stderr: "ignore" });
+      la = { ...la, data: {} };
+    }
     // Match windows on the meaningful words of the name: "Windows Notepad" -> "notepad".
     const want = lc(app).replace(/\.exe$/, "").replace(/\b(windows|microsoft)\b/g, "").trim() || lc(app);
     for (let i = 0; i < 20; i++) {
@@ -242,14 +253,14 @@ export class WinDriver implements Driver {
       return undefined;
     }
     this.counts.fast++;
-    this.onAction?.({ hand, frame: el.frame, kind, via: "fast" });
+    this.onAction?.({ hand, pid: el.pid, frame: el.frame, kind, via: "fast" });
     return { ok: true, route: "fast_lane", effect: r.how, ms: Math.round(r.ms), cli };
   }
 
   private noteCua(hand: HandName, token: string, kind: "press" | "type") {
     this.counts.cua++;
-    const f = this.seen.get(token)?.frame;
-    if (f) this.onAction?.({ hand, frame: f, kind, via: "cua" });
+    const el = this.seen.get(token);
+    if (el?.frame) this.onAction?.({ hand, pid: el.pid, frame: el.frame, kind, via: "cua" });
   }
 
   /**
@@ -348,6 +359,38 @@ export class WinDriver implements Driver {
     // Ending a session also closes its isolated browser, so this runs only on shutdown when asked.
     for (const hand of HANDS) await cuaCall("end_session", { session: hand }, 5_000);
   }
+}
+
+/** The Start Menu or desktop shortcut whose name best matches an app ("Visual Studio Code.lnk"). Exported for tests. */
+export function findShortcut(app: string, dirs = shortcutDirs()): string | undefined {
+  const want = app.toLowerCase().replace(/\.exe$/, "").replace(/[^a-z0-9]+/g, " ").trim();
+  if (!want) return undefined;
+  let best: { path: string; score: number } | undefined;
+  const walk = (dir: string, depth: number) => {
+    let names: string[] = [];
+    try { names = readdirSync(dir); } catch { return; }
+    for (const n of names) {
+      const full = join(dir, n);
+      if (/\.lnk$/i.test(n)) {
+        const have = n.slice(0, -4).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        // exact name first, then a shortcut named inside the app's name or the other way round; never uninstallers
+        const score = /uninstall|readme|help|website/.test(have) ? 0 : have === want ? 3 : have.startsWith(want) || want.startsWith(have) ? 2 : have.includes(want) ? 1 : 0;
+        if (score && (!best || score > best.score)) best = { path: full, score };
+      } else if (depth < 3 && !n.includes(".")) walk(full, depth + 1);
+    }
+  };
+  for (const d of dirs) walk(d, 0);
+  return best?.path;
+}
+
+function shortcutDirs(): string[] {
+  const e = process.env;
+  return [
+    e.APPDATA && join(e.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs"),
+    join(e.ProgramData ?? "C:\\ProgramData", "Microsoft", "Windows", "Start Menu", "Programs"),
+    e.USERPROFILE && join(e.USERPROFILE, "Desktop"),
+    join(e.PUBLIC ?? "C:\\Users\\Public", "Desktop"),
+  ].filter((d): d is string => !!d);
 }
 
 /**

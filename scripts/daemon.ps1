@@ -13,6 +13,11 @@ if ($status -match "is running") {
         Start-Sleep -Milliseconds 500
         if (-not ((& $cd status 2>&1 | Out-String) -match "is running")) { break }
     }
+    if ((& $cd status 2>&1 | Out-String) -match "is running") {
+        # "stop" is not understood by every version: end the daemon's process (only cua-driver, only this user's)
+        Get-Process -Name "cua-driver" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+    }
     if ((& $cd status 2>&1 | Out-String) -match "is running") { Write-Output "The Cua daemon did not stop: quit it from its tray icon, then run this again."; exit 1 }
 }
 $env:CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS = "300"

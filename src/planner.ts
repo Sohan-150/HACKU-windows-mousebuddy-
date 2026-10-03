@@ -13,9 +13,18 @@ export class PlanError extends Error {}
  * "find X then write it in Notepad" -> two parts. Only explicit sequencing words split ("then", "at the same time",
  * "and also", a new sentence after . ? !), so "eggs, milk and bread" stays whole.
  */
+// A new part starts where the instruction moves to another app or another job: "..., and in Notepad write ...",
+// "... and open Discord", ", and send ...". "Open Spotify and play Drake" stays one part (same app).
+const NEW_APP = "(?:in|on|using|with)\\s+(?:the\\s+)?(?:" + ["calculator", "notepad", "word", "excel", "powerpoint", "outlook", "teams", "paint", "file explorer",
+  "chrome", "edge", "the browser", "spotify", "youtube", "discord", "whatsapp", "telegram", "slack", "zoom", "steam", "epic games", "vs ?code",
+  "visual studio code", "settings", "google maps", "google"].join("|") + ")\\b";
+const NEW_JOB = "(?:open|launch|start|go to|switch to)\\b";
+const COMMA_JOB = "(?:open|launch|start|go to|switch to|play|write|type|search|find|look up|calculate|compute|send|message|text|reply|email|call|mute|unmute|join|check|book|organi[sz]e|convert|move|copy)\\b";
+const SPLIT = new RegExp(String.raw`\s*(?:,?\s*\band then\b|,?\s*\bthen\b|,?\s*\b(?:and\s+)?(?:at the same time|meanwhile|while you'?re at it)\b,?|,?\s*\band also\b,?|;\s*|[.?!]\s+(?=[A-Z])|,?\s+and\s+(?=${NEW_APP})|,?\s+and\s+(?=${NEW_JOB})|,\s*and\s+(?=${COMMA_JOB}))\s*`, "i");
+
 export function splitParts(instruction: string): string[] {
   return instruction
-    .split(/\s*(?:,?\s*\band then\b|,?\s*\bthen\b|,?\s*\b(?:and\s+)?(?:at the same time|meanwhile|while you'?re at it)\b,?|,?\s*\band also\b,?|;\s*|[.?!]\s+(?=[A-Z]))\s*/i)
+    .split(SPLIT)
     .map(s => s.trim().replace(/[.!?]+$/, "")).filter(Boolean);
 }
 

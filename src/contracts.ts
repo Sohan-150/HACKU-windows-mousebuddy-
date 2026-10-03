@@ -105,7 +105,7 @@ export interface Driver {
   fastLane?(): { on: boolean; reason: string; fast: number; cua: number; fellBack: number };
 }
 
-export interface ActionNote { hand: HandName; frame: { x: number; y: number; w: number; h: number }; kind: "press" | "type"; via: "fast" | "cua" }
+export interface ActionNote { hand: HandName; pid?: number; frame: { x: number; y: number; w: number; h: number }; kind: "press" | "type"; via: "fast" | "cua" }
 
 // ---------- perception + decisions ----------
 export interface Item {
@@ -150,7 +150,7 @@ export interface Task {
   id: string; instruction: string; source: "typed" | "voice";
   status: "queued" | "planning" | "running" | "done" | "partial" | "failed" | "stopped";   // partial: some parts done, some failed
   plan?: Plan;
-  result?: { answer: string; evidence: string };                        // checked by a second reading of the screen
+  result?: { answer: string; evidence: string; handoff?: boolean };     // checked by a second reading of the screen (handoff: explain mode passed it to the agents)
   exception?: { code: ExceptionCode; reason: string };
   counts: { steps: number; jev: number; claude: number; gui: number; files: number; approvals: number; falseDoneCaught: number };
   cost: { jevUsd: number; claudeUsd: number };

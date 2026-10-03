@@ -40,8 +40,8 @@ const STOP_WORDS = /^(stop|cancel|stop it|stop that|never ?mind|abort)[.!]*$/i;
 const YES = /^(yes|yeah|yep|approve|approved|go ahead|do it|ok(ay)?|sure)\b/i, NO = /^(no|nope|deny|denied|don'?t|do not)\b/i;
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
-// Progress lines worth showing on the screen (the panel shows every status).
-const NOISE = /(?:reading the window|deciding|^idle)$/;
+// Progress lines not worth showing on the screen (the panel shows every status): over in a fraction of a second.
+const NOISE = /(?:reading the window|^idle)$/;
 
 export class App {
   tasks: Task[] = [];
@@ -218,7 +218,7 @@ export class App {
       : await lookBehindPanel(POINTER_HAND, PANEL_TITLE, { screenshot: !!claude }));
     const r = await askScreen(question, at ?? { x: p.x, y: p.y, t: p.t }, { hand: POINTER_HAND, claude, jev: this.jev, conversation: this.turns.slice(-5) }, p);
     showBubble(r.answer, { at: at && !r.marked.length ? at : null, title: "Answer" });
-    this.hold(Math.min(25_000, 5000 + r.answer.length * 55));
+    this.hold(Math.min(12_000, 4000 + r.answer.length * 30));
     const evidence = `${at ? `pointer at ${at.x},${at.y}` : "typed: the window behind the panel"}${r.window ? ` in "${r.window}"` : ""}${at && r.element ? ` on ${r.element}` : ""}; answered by ${r.by}${r.marked.length ? `; marked ${r.marked.join(", ")}` : ""}${r.pointedAt ? `; moved my cursor to ${r.pointedAt}` : ""}`;
     return { ...r, evidence };
   }
@@ -244,6 +244,7 @@ export class App {
     this.running.set(next.id, { task: next, abort });
     this.progress.set(next.id, new Map());
     this.progressMuted = false;
+    this.heldUntil = 0;                // "Thinking…" is over: the task's progress takes the bubble
     const log = new JsonlLogger(newRunId(), new Set([(l: LogLine) => {
       if (l.type === "files" && l.actions.some(a => a.kind === "move")) this.lastMoves = { taskId: l.taskId, actions: l.actions };
       this.emit(l);
@@ -308,8 +309,9 @@ export class App {
     const parts = this.progress.get(t.id);
     if (!parts || NOISE.test(text)) return;
     if (t.status === "planning" && text !== "planning") t.status = "running";
-    const m = text.match(/^(part \d+): (.*)$/);
-    parts.set(m ? m[1] : "", m ? m[2] : text);
+    const m = text.match(/^(part \d+(?: \([^)]*\))?): (.*)$/);
+    const line = (m ? m[2] : text).replace(/^step \d+: deciding$/, "$&what to do next").replace(/^planning$/, "planning the steps");
+    parts.set(m ? m[1] : "", line);
     this.pushState();
     this.refreshBubble();
   }

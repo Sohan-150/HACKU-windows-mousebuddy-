@@ -1,6 +1,8 @@
 // Shared types. Platform-neutral: Windows and macOS drivers both implement `Driver`.
 
-export const HANDS = ["Mint-3", "Red-7", "Blue-9"] as const;            // -N suffix fixes the cursor colour
+// One Cua session per hand; the -N suffix fixes the cursor colour. Mint-3 and Gold-5: the agent's browser windows;
+// Red-7 and Violet-1: desktop apps; Blue-9: point-and-ask (see lanes.ts).
+export const HANDS = ["Mint-3", "Red-7", "Blue-9", "Gold-5", "Violet-1"] as const;
 export type HandName = (typeof HANDS)[number];
 
 /** Our role names. Each driver maps its platform's control types onto these (src/driver/roles.ts). */

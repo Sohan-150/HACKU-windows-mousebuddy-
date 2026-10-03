@@ -2,7 +2,7 @@
 // (hands-research/research-live-gates.md). Browser surface = Safari (one window; AutoFill off). App surface = any app.
 // Measured Mac rules kept here: one get_window_state per step, web-content elements only for Safari, type_text inserts
 // (so a filled field is selected first with Edit > Select All), no set_value in Safari, no Back button, no Cmd shortcuts.
-import type { ActSpec, ActionResult, Driver, DriverCaps, Element, HandName, Observation, WindowSurface, WindowRef } from "../contracts";
+import { HANDS, type ActSpec, type ActionResult, type Driver, type DriverCaps, type Element, type HandName, type Observation, type WindowSurface, type WindowRef } from "../contracts";
 import { cuaCall, DriverError, errorOf, merge, toResult } from "./cli";
 import { axRole } from "./roles";
 
@@ -96,6 +96,6 @@ export class MacDriver implements Driver {
   }
 
   async endAll(): Promise<void> {
-    for (const hand of ["Mint-3", "Red-7", "Blue-9"]) await cuaCall("end_session", { session: hand }, 5_000);
+    for (const hand of HANDS) await cuaCall("end_session", { session: hand }, 5_000);
   }
 }

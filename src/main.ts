@@ -4,6 +4,7 @@ import { makeDriver } from "./driver";
 import { startVoice } from "./intake";
 import { Jev, JEV_MODEL } from "./jev";
 import { App } from "./server";
+import { BROWSER_HANDS } from "./lanes";
 import { stopOverlay, warmOverlay } from "./overlay";
 
 const PANEL_PORT = Number(process.env.PANEL_PORT ?? 3000);
@@ -39,9 +40,9 @@ if (driver.caps.platform !== "sim") {
   } catch (e) {
     app.notice("error", `agent browser not ready: ${(e as Error).message}. Is the Cua daemon running (scripts\\daemon.ps1)?`);
   }
-  // Cua ends a session after 5 idle minutes, and on Windows its browser closes with it: kept alive whenever no task is
-  // using the browser (an app task can run for longer than that).
-  setInterval(() => { if (!app.locks.holder("browser")) driver.keepAlive?.(app.hand).catch(() => {}); }, 60_000);
+  // Cua ends a session after 5 idle minutes, and on Windows its browser closes with it: each browser window's session
+  // is kept alive while no task is using it (an app task can run for longer than that).
+  setInterval(() => { for (const h of BROWSER_HANDS) if (!app.locks.holder(`hand:${h}`)) driver.keepAlive?.(h).catch(() => {}); }, 60_000);
 }
 
 const shutdown = async () => {

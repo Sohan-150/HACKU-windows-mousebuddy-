@@ -92,7 +92,7 @@ If the instruction is about what is on the user's screen right now (what am I lo
 Turn the instruction into as few parts as possible; each part happens in one place.
 - surface "answer": the instruction needs no computer action (a general question you can answer well yourself, advice, maths, a follow-up about an earlier result). Put the complete answer in "reply". Anything current (news, prices, schedules, opening hours, weather) needs the browser. Never answer that you cannot see the screen: questions about what is on screen are handled by another feature.
 - surface "browser": anything on the web. "url" is a full starting address as close to the goal as possible: a site's own search or results URL with the details filled in (flights: https://www.google.com/travel/flights?q=Flights%20from%20HKG%20to%20NRT%20on%202026-11-12%20one%20way; videos: https://www.youtube.com/results?search_query=...), a direct page, or https://html.duckduckgo.com/html/?q=... for a general web search (never google.com/search). For a video, the goal is "a video about X is playing".
-- surface "app": something done in a desktop app; its name exactly as in the installed list in "app". For music in Spotify set "uri" to spotify:search:<words> (opens the search results there) and make the goal "music for <words> is playing in Spotify". Otherwise "uri" is "".
+- surface "app": something done in a desktop app; its name exactly as in the installed list in "app". For music in Spotify set "uri" to spotify:search:<words> (opens the search results there) and make the goal "music for <words> is playing in Spotify". To start a game, use the launcher's own link, which starts it without clicking: Epic Games Launcher "com.epicgames.launcher://apps/<game id>?action=launch&silent=true" (Fortnite: com.epicgames.launcher://apps/Fortnite?action=launch&silent=true), Steam "steam://rungameid/<app id>"; the goal is "<game> is starting" and the user is told about any update or sign-in it needs. Otherwise "uri" is "".
 - surface "document": the user wants a Word document written (an itinerary, letter, notes, a report, a plan). Put a short title in "doc_title" and the complete text, written out in full, in "doc_text", with "# " for headings, "## " for sub-headings and "- " for bullet points. Use this instead of surface "app" for writing in Word.
 - surface "files": organise, move, copy, convert (images between PNG/JPG/BMP/GIF/TIFF; text, HTML or images to PDF; CSV/JSON), list files, or find a file or folder by name ("where is my Year 1 folder", "open my tax return"): file_op "find" with the name as the user said it in "file_name" and folder "" (their whole user folder). Fill file_op, folder (a full path, or Desktop/Downloads/Documents/Pictures/Music/Videos, optionally with a sub-folder like "Downloads\\\\scans"), dest (move/copy), exts (file types without dots, e.g. ["png"]), file_name and to_format (convert). Only folders inside the user folder are allowed.
 - "goal": what must be true when the part is done, in one sentence. If the user asked for information, say the answer must be visible on screen.
@@ -252,7 +252,8 @@ type RawPart = { surface: "answer" | "browser" | "app" | "document" | "files"; u
   doc_title: string; doc_text: string; values: { name: string; text: string }[];
   file_op: string; folder: string; dest: string; exts: string[]; file_name: string; to_format: string };
 
-const SAFE_URI = /^(spotify|mailto|ms-settings):/i;
+// Links an app handles itself: open at a place (Spotify search, a settings page) or start a game in its launcher.
+const SAFE_URI = /^(spotify|mailto|ms-settings|com\.epicgames\.launcher|steam):/i;
 const PLAYING = /\b(play|playing|listen)\b/i;
 
 function toSubtask(raw: Partial<RawPart>): Subtask {

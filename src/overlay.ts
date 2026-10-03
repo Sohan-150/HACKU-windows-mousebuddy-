@@ -9,6 +9,8 @@ import { join } from "node:path";
 const SCRIPT = join(import.meta.dir, "..", "native", "win", "overlay.ps1");
 let proc: Subprocess<"pipe", "pipe", "ignore"> | null = null;
 let hello: object | undefined;
+let userQuit = false;                 // "Quit" in the tray menu: not restarted until the app restarts
+let lastStart = 0, quickExits = 0;    // an overlay that keeps dying right after starting is given up on
 
 export type OverlayEvent =
   | { event: "ready" }
@@ -17,7 +19,8 @@ export type OverlayEvent =
   | { event: "step"; go: "next" | "back" }
   | { event: "dismiss" }
   | { event: "stop" }
-  | { event: "key"; what: string };
+  | { event: "key"; what: string }
+  | { event: "quit" };
 
 /** a drawing on the screen, in physical screen pixels (the space of Cua's frames) */
 export interface Shape {
@@ -31,17 +34,30 @@ const listeners = new Set<(e: OverlayEvent) => void>();
 /** what the overlay sends: a typed question, lesson keys, Esc twice, the tray's Stop, a capture */
 export function onOverlay(f: (e: OverlayEvent) => void): () => void { listeners.add(f); return () => listeners.delete(f); }
 
-export const overlayOn = (): boolean => process.platform === "win32" && process.env.OVERLAY !== "off" && existsSync(SCRIPT);
+export const overlayOn = (): boolean => process.platform === "win32" && process.env.OVERLAY !== "off" && existsSync(SCRIPT) && !userQuit && quickExits < 3;
+
+listeners.add(e => { if (e.event === "quit") userQuit = true; });
 
 /** starts the helper ahead of time (about 1 s to start), so the first answer is immediate */
 export function warmOverlay(greeting?: object): void {
   if (greeting) hello = greeting;
   if (!overlayOn() || proc) return;
+  // at most one start every 5 s, whatever is sent meanwhile (the agents' widgets update several times a second)
+  if (Date.now() - lastStart < 5000) return;
+  lastStart = Date.now();
   try {
     const p = Bun.spawn(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", SCRIPT],
       { stdin: "pipe", stdout: "pipe", stderr: "ignore" });
     proc = p;
-    p.exited.then(() => { if (proc === p) proc = null; });
+    const started = Date.now();
+    p.exited.then(code => {
+      if (proc === p) proc = null;
+      if (userQuit) return;
+      if (Date.now() - started < 15_000) {
+        quickExits++;
+        if (quickExits >= 3) console.log(`[overlay] the overlay keeps closing (exit ${code}): turned off until restart; answers are spoken with the Windows voice`);
+      } else quickExits = 0;
+    });
     void readEvents(p.stdout);
     if (hello) send({ cmd: "hello", ...hello });
   } catch { proc = null; }

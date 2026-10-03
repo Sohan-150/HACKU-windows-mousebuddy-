@@ -107,7 +107,11 @@ export class Voice {
   private async quota() {
     try {
       const r = await this.http("https://api.elevenlabs.io/v1/user/subscription", { headers: { "xi-api-key": this.key! }, signal: AbortSignal.timeout(4000) });
-      if (r.status === 401) { this.enabled = false; console.log("[voice] ElevenLabs key rejected: using the Windows voice"); return; }
+      if (r.status === 401) {
+        // A key limited to Text to Speech may not read the subscription: speak anyway, without knowing the quota.
+        if (/missing_permission/i.test(await r.text())) { console.log("[voice] ElevenLabs: this key can't read the quota (no User permission); speaking anyway"); return; }
+        this.enabled = false; console.log("[voice] ElevenLabs key rejected: using the Windows voice"); return;
+      }
       const j: any = await r.json();
       this.left = j.character_limit - j.character_count;
       console.log(`[voice] ElevenLabs (${j.tier}): ${this.left} of ${j.character_limit} credits left this month`);

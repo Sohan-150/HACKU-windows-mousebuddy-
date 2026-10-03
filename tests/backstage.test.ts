@@ -6,6 +6,7 @@ import type { ExplainAnswer, ExplainShape } from "../src/claude";
 import type { AgentState } from "../src/contracts";
 import { SimDriver } from "../src/driver/sim";
 import { Explainer, place, type Capture } from "../src/explain";
+import { FastLane } from "../src/fastlane";
 import type { ScreenControl } from "../src/pointer";
 import { sayable, spokenSummary, tidyAnswer } from "../src/results";
 import { route } from "../src/router";
@@ -183,6 +184,19 @@ describe("explain mode: answers and lessons", () => {
     expect(voice.credits).toBe(9900 - 28);       // the quota, counted down by the first part's cost
   });
 
+  test("ElevenLabs: a key that can't read the quota still speaks; a rejected key switches to the Windows voice", async () => {
+    const limited = new Voice({ key: "tts-only", fetch: async (url: string) => url.endsWith("/subscription")
+      ? new Response(JSON.stringify({ detail: { status: "missing_permissions", message: "The API key you used is missing the permission user_read" } }), { status: 401 })
+      : new Response(new Uint8Array([1, 2, 3])) });
+    expect((await limited.speak("Hello there.")).audio).toEqual(new Uint8Array([1, 2, 3]));
+    expect(limited.on).toBe(true);
+    const bad = new Voice({ key: "wrong", fetch: async () => new Response(JSON.stringify({ detail: { status: "invalid_api_key" } }), { status: 401 }) });
+    expect((await bad.speak("Hello there.")).audio).toBeUndefined();
+    expect([bad.on, bad.name]).toEqual([false, "Windows voice"]);
+    expect(Voice.parts("Click the File menu at the top left of the window. Then choose Save As. Pick a folder.")).toEqual(["Click the File menu at the top left of the window.", "Then choose Save As. Pick a folder."]);
+    expect(Voice.parts("Short one. And then the rest of it.")).toEqual(["Short one. And then the rest of it."]);
+  });
+
   test("no overlay: the answer is spoken with the system voice", async () => {
     const said: string[] = [];
     const ex = new Explainer({ claude: fakeClaude({ steps: [{ say: "It saves the file.", shapes: [] }] }), jev: null, send: () => false, speak: t => said.push(t), voice: quietVoice(), capture: async () => cap(), journal: "/dev/null" });
@@ -268,5 +282,43 @@ describe("the server: the hotkey's words, the agents' widgets", () => {
     for (let i = 0; i < 100 && app.tasks[0]?.status !== "done"; i++) await Bun.sleep(10);
     expect(captures).toBe(1);                    // the question typed in the box uses the picture from key down
     expect(app.tasks[0].result?.evidence).toStartWith(`pointer at 700,500 in "Essay - Word"`);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+describe("fast lane (UI Automation directly)", () => {
+  // a stand-in for native/win/fastlane.ps1: the same protocol
+  const helper = `
+    process.stdout.write(JSON.stringify({ ready: true }) + "\\n");
+    let buf = "";
+    process.stdin.on("data", d => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf("\\n")) >= 0) {
+        const r = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
+        const ok = r.op === "press" && r.role === "Button" && r.label === "Seven" && r.hwnd === 9 && r.w === 40;
+        const reply = ok ? { id: r.id, ok: true, ms: 2.5, how: "hit-test invoke" }
+          : { id: r.id, ok: false, ms: 1, error: r.op === "type" ? "inside a web page: needs key events " + r.text : "element not found where the agent saw it" };
+        setTimeout(() => process.stdout.write(JSON.stringify(reply) + "\\n"), r.op === "type" ? 5 : 30);   // answers out of order
+      }
+    });`;
+
+  test("presses and inserts go to the helper; what it can't do comes back not ok (then the driver uses Cua)", async () => {
+    const lane = new FastLane({ spawn: () => Bun.spawn([process.execPath, "-e", helper], { stdin: "pipe", stdout: "pipe", stderr: "ignore" }) });
+    expect(await lane.whenReady()).toBe(true);
+    const seven = { pid: 42, hwnd: 9, frame: { x: 10, y: 20, w: 40, h: 30 }, role: "Button", label: "Seven" };
+    const [press, type] = await Promise.all([lane.press(seven), lane.type({ ...seven, role: "Edit", label: "Search" }, "café")]);
+    expect(press).toEqual({ ok: true, ms: 2.5, how: "hit-test invoke", error: undefined });
+    expect(type).toMatchObject({ ok: false, error: "inside a web page: needs key events café" });
+    expect((await lane.press({ ...seven, label: "Eight" })).error).toBe("element not found where the agent saw it");
+    lane.stop();
+  });
+
+  test("off when the helper doesn't start, or with FAST_INPUT=off: nothing waits on it", async () => {
+    const dead = new FastLane({ spawn: () => Bun.spawn([process.execPath, "-e", "process.exit(0)"], { stdin: "pipe", stdout: "pipe", stderr: "ignore" }) });
+    expect(await dead.whenReady()).toBe(false);
+    expect((await dead.press({ pid: 1, frame: { x: 0, y: 0, w: 5, h: 5 }, role: "Button" })).ok).toBe(false);
+    process.env.FAST_INPUT = "off";
+    try { expect(await new FastLane().whenReady()).toBe(false); } finally { delete process.env.FAST_INPUT; }
   });
 });

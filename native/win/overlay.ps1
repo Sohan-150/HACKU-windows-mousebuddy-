@@ -20,7 +20,7 @@
 #   in:  hello {key} | capture {id} | listening | status {text} | idle | typebox | clear | error {text}
 #        answer {seq, say, shapes[], step?, fadeMs, audio: "follows"|"system"} | audio {seq, part, path} | speak {seq, part, say}
 #        agents {running, tasks[]} | tap {colour, x, y, w, h}
-#   out: ready | captured {id, path, imgW, imgH, x, y, w, h, cx, cy} | ask {text, cursor} | step {go} | dismiss | stop | key {what}
+#   out: ready | captured {id, path, imgW, imgH, x, y, w, h, cx, cy} | ask {text, cursor} | step {go} | dismiss | stop | key {what} | quit
 $ErrorActionPreference = "Stop"
 Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Speech -TypeDefinition @"
 using System;
@@ -658,7 +658,7 @@ public static class Overlay {
         menu.Items.Add(new ToolStripSeparator());
         talkLine = new ToolStripMenuItem("Hold the talk keys to talk \u00b7 tap them to type"); talkLine.Enabled = false; menu.Items.Add(talkLine);
         var keysLine = new ToolStripMenuItem("Esc: stop talking (again: clear) \u00b7 Alt+\u2192 / Alt+\u2190: next / back"); keysLine.Enabled = false; menu.Items.Add(keysLine);
-        menu.Items.Add("Quit Backstage Overlay", null, (s, e) => { tray.Visible = false; Application.Exit(); });
+        menu.Items.Add("Quit Backstage Overlay", null, (s, e) => { Out(Msg("quit")); tray.Visible = false; Application.Exit(); });
         var icon = new Bitmap(32, 32);
         using (var g = Graphics.FromImage(icon)) {
             g.SmoothingMode = SmoothingMode.AntiAlias; g.Clear(Color.Transparent);

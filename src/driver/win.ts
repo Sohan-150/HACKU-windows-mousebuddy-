@@ -5,7 +5,8 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { HANDS, type ActSpec, type ActionResult, type Driver, type DriverCaps, type Element, type HandName, type Observation, type WindowSurface, type WindowRef } from "../contracts";
+import { HANDS, type ActionNote, type ActSpec, type ActionResult, type Driver, type DriverCaps, type Element, type HandName, type Observation, type WindowSurface, type WindowRef } from "../contracts";
+import { FastLane } from "../fastlane";
 import { cuaCall, cuaText, DriverError, errorOf, merge, toResult } from "./cli";
 import { browserRole, uiaRole } from "./roles";
 
@@ -70,6 +71,12 @@ function dedupe(lines: string[]): string[] {
 
 export class WinDriver implements Driver {
   caps: DriverCaps = { platform: "win32", name: "Windows (Cua 0.32.0: browser route + UI Automation)" };
+  /** presses and native text inserts straight through UI Automation; Cua for everything else and as the fallback */
+  readonly fast = new FastLane();
+  readonly counts = { fast: 0, cua: 0, fellBack: 0 };
+  /** what each app element token pointed at when it was read: lets the fast lane find the same element */
+  private seen = new Map<string, { pid: number; hwnd: number; role: string; label?: string; frame?: { x: number; y: number; w: number; h: number } }>();
+  onAction?: (n: ActionNote) => void;
   private apps?: string[];
   private launchInfo = new Map<string, { aumid?: string; path?: string }>();
   // The agent's browser pid, remembered across restarts so a restart reuses it instead of opening another.
@@ -213,7 +220,36 @@ export class WinDriver implements Driver {
     const r = await cuaCall("get_window_state", { session: hand, pid: w.pid, window_id: w.windowId, include_screenshot: false, timeout_ms: 4000, max_elements: 1000 }, 15_000);
     const err = errorOf(r.data);
     if (err) throw new DriverError(err.code, err.hint);
+    for (const e of r.data.elements ?? []) {
+      if (e.element_token) this.seen.set(e.element_token, { pid: w.pid, hwnd: w.windowId, role: String(e.role ?? ""), label: e.label ?? undefined, frame: e.frame ?? undefined });
+    }
+    if (this.seen.size > 20_000) this.seen = new Map([...this.seen].slice(-5000));
     return appObservation(r.data, w, hand, r.ms);
+  }
+
+  fastLane() { return { on: this.fast.on, reason: this.fast.reason, ...this.counts }; }
+
+  /** try the fast lane; undefined = do it through Cua (the fast lane is off, or couldn't do it safely) */
+  private async tryFast(hand: HandName, token: string, kind: "press" | "type", text?: string): Promise<ActionResult | undefined> {
+    const el = this.seen.get(token);
+    if (!this.fast.on || !el?.frame || !el.role) return undefined;
+    const t = { pid: el.pid, hwnd: el.hwnd, frame: el.frame, role: el.role, label: el.label };
+    const r = kind === "press" ? await this.fast.press(t) : await this.fast.type(t, text ?? "");
+    const cli = `fastlane ${kind} ${el.role} "${el.label ?? ""}"${kind === "type" ? ` "${(text ?? "").slice(0, 40)}"` : ""}`;
+    if (!r.ok) {
+      this.counts.fellBack++;
+      console.log(`[fast lane] ${cli} -> Cua (${r.error})`);
+      return undefined;
+    }
+    this.counts.fast++;
+    this.onAction?.({ hand, frame: el.frame, kind, via: "fast" });
+    return { ok: true, route: "fast_lane", effect: r.how, ms: Math.round(r.ms), cli };
+  }
+
+  private noteCua(hand: HandName, token: string, kind: "press" | "type") {
+    this.counts.cua++;
+    const f = this.seen.get(token)?.frame;
+    if (f) this.onAction?.({ hand, frame: f, kind, via: "cua" });
   }
 
   /**
@@ -281,9 +317,17 @@ export class WinDriver implements Driver {
   private async actApp(hand: HandName, w: WindowRef, a: ActSpec): Promise<ActionResult> {
     const base = { session: hand, pid: w.pid, window_id: w.windowId };
     switch (a.tool) {
-      case "click": return toResult(await cuaCall("click", { ...base, element_token: a.token }));
+      case "click": {
+        const fast = await this.tryFast(hand, a.token, "press");
+        if (fast) return fast;
+        this.noteCua(hand, a.token, "press");
+        return toResult(await cuaCall("click", { ...base, element_token: a.token }));
+      }
       case "type": {
-        // set_value replaces the content through the UIA ValuePattern; type_text inserts characters.
+        // The fast lane and set_value replace the content through the UIA ValuePattern; type_text inserts characters.
+        const fast = await this.tryFast(hand, a.token, "type", a.text);
+        if (fast) return fast;
+        this.noteCua(hand, a.token, "type");
         const set = await cuaCall("set_value", { ...base, element_token: a.token, value: a.text });
         const res = toResult(set);
         if (res.ok) return res;
@@ -300,6 +344,7 @@ export class WinDriver implements Driver {
   }
 
   async endAll(): Promise<void> {
+    this.fast.stop();
     // Ending a session also closes its isolated browser, so this runs only on shutdown when asked.
     for (const hand of HANDS) await cuaCall("end_session", { session: hand }, 5_000);
   }

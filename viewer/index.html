@@ -2,263 +2,332 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Background Agent</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Backstage</title>
 <style>
-  :root {
-    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c1f24; --muted: #626a75; --line: #e1e4e8;
-    --accent: #1f8a70; --accent-ink: #ffffff; --warn: #8a5300; --warn-bg: #fff4e0;
-    --bad: #b42318; --bad-bg: #fde8e7; --good: #1f7a3a; --good-bg: #e6f4ea; --run: #1d5fa8; --run-bg: #e7f0fb;
-    --jev: #6b3fa0; --jev-bg: #f1eafb; --claude: #a04f1f; --claude-bg: #fbeee5;
-    --mono: ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #121418; --panel: #1b1e24; --ink: #e8eaed; --muted: #9aa3ad; --line: #2c3139;
-      --accent: #3fbf96; --accent-ink: #0b1f18; --warn: #f0b45a; --warn-bg: #2e2416;
-      --bad: #ff8a80; --bad-bg: #3a1d1b; --good: #7ed69a; --good-bg: #17301f; --run: #8ab8f0; --run-bg: #18263a;
-      --jev: #c9a8f5; --jev-bg: #2a2038; --claude: #f3b48a; --claude-bg: #35241a;
-    }
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
-  header h1 { font-size: 18px; margin: 0 6px 0 0; }
-  .badge { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
-  .badge.on { color: var(--good); background: var(--good-bg); border-color: transparent; }
-  .badge.off { color: var(--bad); background: var(--bad-bg); border-color: transparent; }
-  .notice { padding: 7px 16px; font-size: 13px; border-bottom: 1px solid var(--line); }
-  .notice.warn { background: var(--warn-bg); color: var(--warn); }
-  .notice.info { background: var(--run-bg); color: var(--run); }
-  .notice.error { background: var(--bad-bg); color: var(--bad); }
-  main { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 16px; padding: 16px; max-width: 1400px; margin: 0 auto; }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
-  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 16px; }
-  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 10px; }
-  textarea { width: 100%; min-height: 84px; resize: vertical; font: inherit; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .spread { justify-content: space-between; }
-  button { font: inherit; font-size: 14px; padding: 7px 13px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
-  button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
-  button.danger { color: var(--bad); }
-  button:disabled { opacity: .5; cursor: default; }
-  .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
-  .examples button { font-size: 12.5px; padding: 4px 9px; color: var(--muted); }
-  .voice { display: inline-flex; align-items: center; gap: 6px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
-  .dot.live { background: var(--bad); animation: pulse 1s infinite; }
-  .dot.busy { background: var(--warn); }
-  @keyframes pulse { 50% { opacity: .3; } }
-  .approval { border: 2px solid var(--warn); background: var(--warn-bg); color: var(--ink); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
-  .approval b { color: var(--warn); }
-  .task { border-top: 1px solid var(--line); padding: 10px 0; }
-  .task:first-child { border-top: 0; padding-top: 0; }
-  .task .instr { font-weight: 600; overflow-wrap: anywhere; }
-  .pill { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; white-space: nowrap; }
-  .pill.queued, .pill.stopped { background: var(--line); color: var(--muted); }
-  .pill.planning, .pill.running { background: var(--run-bg); color: var(--run); }
-  .pill.done { background: var(--good-bg); color: var(--good); }
-  .pill.partial { background: var(--warn-bg); color: var(--warn); }
-  .progress { margin-top: 6px; color: var(--run); font-size: 13px; white-space: pre-line; overflow-wrap: anywhere; }
-  .pill.failed { background: var(--bad-bg); color: var(--bad); }
-  .answer { margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: var(--good-bg); overflow-wrap: anywhere; white-space: pre-line; }
-  .reason { margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: var(--bad-bg); overflow-wrap: anywhere; white-space: pre-line; }
-  .meta { color: var(--muted); font-size: 12.5px; margin-top: 6px; font-family: var(--mono); overflow-wrap: anywhere; }
-  .evidence { color: var(--muted); font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
-  #feed { font: 12.5px/1.55 var(--mono); max-height: 620px; overflow: auto; }
-  .ev { padding: 3px 0; border-bottom: 1px dashed var(--line); overflow-wrap: anywhere; }
-  .ev.dim { color: var(--muted); } .ev.good { color: var(--good); } .ev.bad { color: var(--bad); } .ev.warn { color: var(--warn); }
-  .who { display: inline-block; font-size: 11px; font-weight: 700; padding: 0 6px; border-radius: 4px; margin-right: 6px; }
-  .who.jev { color: var(--jev); background: var(--jev-bg); }
-  .who.claude { color: var(--claude); background: var(--claude-bg); }
-  .who.rule { color: var(--muted); background: var(--line); }
-  #status { font-size: 13px; color: var(--muted); }
-  select { font: inherit; font-size: 13px; padding: 5px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); max-width: 100%; }
+  /* The Mac version's panel (viewer/index.html there): same palette, cards and layout; Segoe UI on Windows. */
+  :root{--bg:#f5f5f7;--card:#fff;--ink:#1d1d1f;--mute:#6e6e73;--line:#e2e2e7;--accent:#0071e3;
+    --ok:#1a7f37;--okbg:#e7f6ec;--bad:#b42318;--badbg:#fdecea;--warn:#8a5a00;--warnbg:#fff4d6;--infobg:#e8f1fd;
+    --mono:ui-monospace,"Cascadia Mono",Consolas,monospace}
+  @media (prefers-color-scheme: dark){:root{--bg:#111214;--card:#1b1c1f;--ink:#f2f2f4;--mute:#9a9aa3;--line:#2c2d31;--accent:#4aa3ff;
+    --ok:#4cd07d;--okbg:#12301f;--bad:#ff8b7e;--badbg:#38191a;--warn:#ffc857;--warnbg:#3a2f12;--infobg:#16263b}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif}
+  header{padding:14px 20px;background:var(--card);border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center}
+  h1{margin:0;font-size:19px}.sub{color:var(--mute);font-size:13px}
+  .pills{display:flex;flex-wrap:wrap;gap:8px}
+  .pill{display:inline-flex;gap:6px;align-items:center;padding:3px 10px;border-radius:99px;border:1px solid var(--line);font-size:12.5px;font-weight:600;background:var(--bg);white-space:nowrap}
+  .pill.off{color:var(--bad);border-color:var(--bad)}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--mute)}.dot.live{background:var(--bad);animation:pulse 1s infinite}.dot.busy{background:var(--warn)}
+  @keyframes pulse{50%{opacity:.3}}
+  .notice{padding:7px 20px;font-size:13px;border-bottom:1px solid var(--line)}
+  .notice.warn{background:var(--warnbg);color:var(--warn)}.notice.info{background:var(--infobg);color:var(--accent)}.notice.error{background:var(--badbg);color:var(--bad)}
+  main{padding:16px 20px;display:grid;gap:16px;max-width:1500px;margin:0 auto}
+  section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;min-width:0}
+  h2{margin:0 0 10px;font-size:12.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--mute)}
+  textarea{width:100%;min-height:62px;resize:vertical;border-radius:10px;border:1px solid var(--line);padding:10px 12px;background:var(--bg);color:var(--ink);font:inherit;font-size:15px;line-height:1.4}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}.spread{justify-content:space-between}
+  button{padding:8px 14px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:inherit;font-size:14px;cursor:pointer}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.danger{color:var(--bad);border-color:var(--bad)}
+  button.small{padding:3px 10px;font-size:12.5px}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .chip{display:inline-block;padding:4px 10px;border-radius:99px;background:var(--bg);border:1px dashed var(--line);font-size:12.5px;cursor:pointer;margin:6px 6px 0 0;color:var(--ink)}
+  .hint{color:var(--mute);font-size:13px;margin:8px 0 0}
+  .approval{border:2px solid var(--warn);background:var(--warnbg);border-radius:12px;padding:12px 14px}
+  .approval b{color:var(--warn)}
+  .agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+  .agent{border:1px solid var(--line);border-radius:12px;padding:12px;border-top:5px solid var(--c);background:var(--bg);min-width:0}
+  .agent .t{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .badge{display:inline-flex;align-items:center;gap:6px;font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.badge i{width:11px;height:11px;border-radius:50%;background:var(--c);display:inline-block;flex:none}
+  .st{font-size:12px;font-weight:700;padding:2px 9px;border-radius:99px;white-space:nowrap}
+  .st.running,.st.planning{background:var(--warnbg);color:var(--warn)}.st.done{background:var(--okbg);color:var(--ok)}.st.failed{background:var(--badbg);color:var(--bad)}
+  .st.queued,.st.stopped{border:1px solid var(--line);color:var(--mute)}.st.partial{background:var(--warnbg);color:var(--warn)}
+  .goal{margin:6px 0;font-size:13.5px;overflow-wrap:anywhere}.now{font-size:12.5px;color:var(--mute);overflow-wrap:anywhere}
+  .ans{margin-top:6px;font-size:13.5px;overflow-wrap:anywhere;white-space:pre-line}.ans.ok{color:var(--ok)}.ans.bad{color:var(--bad)}
+  .last{margin-top:8px;font-size:12.5px;overflow-wrap:anywhere}
+  .bars{display:flex;flex-wrap:wrap;gap:10px;margin-top:4px;font-size:12px;color:var(--mute)}
+  .bar{display:flex;align-items:center;gap:5px}.bar i{width:58px;height:6px;background:var(--line);border-radius:3px;overflow:hidden;display:block}.bar i b{display:block;height:100%;background:var(--accent)}
+  .bar.low i b{background:var(--bad)}
+  .meta{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--mute)}
+  .task{border-top:1px solid var(--line);padding:10px 0}.task:first-child{border-top:0;padding-top:0}
+  .task .instr{font-weight:600;overflow-wrap:anywhere}
+  .evidence{color:var(--mute);font-size:12.5px;margin-top:4px;overflow-wrap:anywhere}
+  table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:7px 6px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+  th{color:var(--mute);font-weight:600;font-size:12px}td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}th.num{text-align:right}
+  td.cmd{max-width:190px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tablewrap{overflow-x:auto}
+  .tag{font-size:11.5px;padding:1px 7px;border-radius:6px;border:1px solid var(--line);white-space:nowrap}
+  .tag.jev{color:var(--accent);border-color:var(--accent)}.tag.claude{color:var(--warn);border-color:var(--warn)}.tag.rule,.tag.code{color:var(--mute)}.tag.fast{color:var(--ok);border-color:var(--ok)}
+  #feed{max-height:62vh;overflow:auto;font-size:13px}
+  .ln{padding:6px 0 6px 10px;border-left:4px solid var(--c,#888);margin-bottom:5px;overflow-wrap:anywhere}
+  .ln .h{display:flex;justify-content:space-between;gap:8px;color:var(--mute);font-size:12px}
+  .ln.bad{color:var(--bad)}.ln.good{color:var(--ok)}.ln.warn{color:var(--warn)}
+  .grid2{display:grid;grid-template-columns:1.1fr .9fr;gap:16px}@media (max-width:1000px){.grid2{grid-template-columns:1fr}}
+  .callout{font-size:13px;color:var(--mute);margin-top:8px}
+  select{font:inherit;font-size:13px;padding:5px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);max-width:100%}
+  #status{font-size:12.5px;color:var(--mute);max-width:65%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 </style>
 </head>
 <body>
 <header>
-  <h1>Background Agent</h1>
-  <span class="badge" id="jev">jev …</span>
-  <span class="badge" id="claude">Claude …</span>
-  <span class="badge" id="driver">driver …</span>
-  <span class="voice badge"><span class="dot" id="vdot"></span><span id="vtext">voice …</span></span>
+  <div><h1>Backstage</h1><div class="sub">Tell it what to do. Coloured agents work in your apps' windows in the background. A cheap classifier decides every step instead of an LLM.</div></div>
+  <div class="pills">
+    <span class="pill" id="kTs">TypeSafe</span><span class="pill" id="kAn">Anthropic</span>
+    <span class="pill"><span class="dot" id="vdot"></span><span id="vin">voice</span></span>
+    <span class="pill" id="vout">voice out</span><span class="pill" id="fast" style="display:none"></span>
+  </div>
 </header>
 <div id="notices"></div>
 <main>
-  <div>
-    <div id="approvals"></div>
+  <div id="approvals" style="display:grid;gap:10px"></div>
+  <section>
+    <h2>Command</h2>
+    <form id="form">
+      <textarea id="text" placeholder="e.g. Compute 45 times 12 in Calculator, and in Notepad write a note that the meeting moved to 5pm" aria-label="Instruction"></textarea>
+    </form>
+    <div>
+      <span class="chip" data-c="Clear the calculator and compute 128 times 37 in Calculator">Calculator</span>
+      <span class="chip" data-c="Open Notepad and write a shopping list: eggs, milk, bread">Notepad</span>
+      <span class="chip" data-c="Find out when the University of Hong Kong was founded">Browser</span>
+      <span class="chip" data-c="Compute 45 times 12 in Calculator, and in Notepad write a short note saying the team meeting moved to 5pm">Two agents at once</span>
+      <span class="chip" data-c="Find flights from Hong Kong to Tokyo on 20 November">Flights</span>
+      <span class="chip" data-c="Organise my Downloads folder">Files</span>
+      <span class="chip" data-c="Get directions from Central to the airport">Directions</span>
+    </div>
+    <div class="row spread">
+      <span class="row" style="margin:0">
+        <button class="primary" id="run" type="button">Run</button>
+        <button id="pointask" type="button" title="Type a question, press this, then point at something within 3 seconds">Point &amp; ask</button>
+        <button class="danger" id="stop" type="button">Stop</button>
+        <button id="undo" type="button" hidden>Undo last file moves</button>
+      </span>
+      <span class="sub" id="keysHint">Or hold the talk keys and talk (tap them to type): ask about anything on your screen, or give the agents a job.</span>
+    </div>
+    <p class="hint">It works in its own browser windows or your desktop apps, behind your windows, or directly on files in your user folder. Anything that looks irreversible (send, pay, submit, save, any file change) waits for your approval. It never deletes or overwrites files, and never types passwords or card numbers.</p>
+  </section>
+
+  <section>
+    <h2>Agents <span class="sub" id="runLbl"></span></h2>
+    <div class="agents" id="agents"><div class="sub">No agents working yet.</div></div>
+  </section>
+
+  <div class="grid2">
     <section>
-      <h2>What should it do?</h2>
-      <form id="form">
-        <textarea id="text" placeholder="e.g. Find out when the University of Hong Kong was founded" aria-label="Instruction"></textarea>
-        <div class="row spread" style="margin-top:8px">
-          <span class="hint" id="voicehint" style="margin:0">Type, or hold the talk keys (Ctrl+Win) and talk. Point the mouse at anything and ask "what is this?", "where is save?" or "circle the zebra". Typed questions about the screen ("what am I looking at?") use the window you were in.</span>
-          <span class="row"><button type="button" id="pointask" title="Type a question, press this, then point at something within 3 seconds">Point &amp; ask</button><button class="primary" type="submit">Run</button></span>
-        </div>
-      </form>
-      <div class="row examples" style="margin-top:10px" aria-label="Examples">
-        <button type="button">Find out when the University of Hong Kong was founded</button>
-        <button type="button">Find flights from Hong Kong to Tokyo on 20 November</button>
-        <button type="button">Calculate 128.5 times 12 in Calculator</button>
-        <button type="button">Open Notepad and write a shopping list: eggs, milk, bread</button>
-        <button type="button">Organise my Downloads folder</button>
-        <button type="button">Convert all PNG images on my Desktop to jpg</button>
-        <button type="button">Get directions from Central to the airport</button>
-      </div>
-      <p class="hint">It works in its own browser window or a desktop app, behind your windows, or directly on files in your user folder. Anything that looks irreversible (send, pay, submit, save, any file change) waits for your approval. It never deletes files, never overwrites them, and never types passwords or card numbers.</p>
+      <div class="row spread" style="margin:0 0 10px"><h2 style="margin:0">Live steps</h2><span id="status">idle</span></div>
+      <div id="feed"><div class="sub">Steps appear here as the agents work. Each says who decided it: <span class="tag jev">jev</span> the fast classifier, or <span class="tag claude">Claude</span> when jev was unsure.</div></div>
     </section>
-    <section>
-      <div class="row spread"><h2 style="margin:0">Tasks</h2><div class="row"><button id="undo" hidden>Undo last file moves</button><button class="danger" id="stop">Stop</button><button id="clear">Clear</button></div></div>
-      <div id="tasks" style="margin-top:10px"></div>
-    </section>
-  </div>
-  <div>
-    <section>
-      <div class="row spread"><h2 style="margin:0">Live steps</h2><span id="status">idle</span></div>
-      <div id="feed" style="margin-top:10px"><p class="hint">Each step shows who decided it: <span class="who jev">jev</span> the fast classifier, or <span class="who claude">claude</span> when jev was unsure or unavailable.</p></div>
-    </section>
-    <section>
-      <div class="row spread"><h2 style="margin:0">Past runs</h2><select id="runs" aria-label="Replay a past run"><option value="">Replay a past run…</option></select></div>
-    </section>
+    <div style="display:grid;gap:16px;align-content:start;min-width:0">
+      <section>
+        <div class="row spread" style="margin:0 0 10px"><h2 style="margin:0">Tasks</h2><button class="small" id="clear" type="button">Clear</button></div>
+        <div id="tasks"><div class="sub">No tasks yet.</div></div>
+      </section>
+      <section>
+        <h2>Runs: cost and speed</h2>
+        <div class="tablewrap"><table><thead><tr><th>Task</th><th>Brain</th><th class="num">Done</th><th class="num">Time</th><th class="num" title="steps decided by jev / by Claude">Decisions</th><th class="num">Cost</th></tr></thead><tbody id="runs"></tbody></table></div>
+        <div class="callout">"Decisions" are the steps decided by jev (fractions of a cent) or by Claude when jev was unsure. Claude's cost also covers planning, checking the result and explaining the screen.</div>
+        <div class="row"><select id="past" aria-label="Replay a past run"><option value="">Replay a past run…</option></select></div>
+      </section>
+    </div>
   </div>
 </main>
 <script>
-const $ = id => document.getElementById(id);
-const el = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); for (const k of kids) e.append(k); return e; };
-const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}) }).then(r => r.json());
-let state = null, lastDraft = "";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const post = (p, b) => fetch(p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b || {}) }).then((r) => r.json());
+let S = null, lastDraft = "";
+const agents = {};                    // taskId/part -> its latest state (from the snapshot and the "agent" log lines)
+const lastStep = {};                  // taskId/part -> its latest step
+const parts = {};                     // taskId -> number of parts in its plan
 
-function renderState(s) {
-  state = s;
-  $("jev").textContent = s.deciders.jev ? "TypeSafe jev: on" : "TypeSafe jev: off";
-  $("jev").className = "badge " + (s.deciders.jev ? "on" : "off");
-  $("claude").textContent = s.deciders.claude ? "Claude: on" : "Claude: off";
-  $("claude").className = "badge " + (s.deciders.claude ? "on" : "off");
-  $("driver").textContent = s.driver;
-  if (!$("vdot").classList.contains("live") && !$("vdot").classList.contains("busy")) $("vtext").textContent = s.voice;
+const col = (id) => (agents[id] && agents[id].colour) || "#8a8f98";
+const money = (x) => "$" + (x > 0 && x < 0.001 ? x.toFixed(5) : x.toFixed(4));
+const secs = (t) => t.startedAt && t.endedAt ? ((Date.parse(t.endedAt) - Date.parse(t.startedAt)) / 1000).toFixed(1) + " s" : "";
+function bar(name, p, conf) {
+  if (conf == null) return "";
+  const top = p ? Object.entries(p).sort((a, b) => b[1] - a[1])[0] : null;
+  return `<span class="bar ${conf < 0.4 ? "low" : ""}">${name}${top ? " " + esc(top[0]) : ""} <i><b style="width:${Math.round(conf * 100)}%"></b></i> ${conf.toFixed(2)}</span>`;
+}
+
+// ---------- the command box ----------
+document.querySelectorAll(".chip").forEach((c) => c.onclick = () => { $("text").value = c.dataset.c; $("text").focus(); });
+async function run() {
+  const text = $("text").value.trim();
+  if (!text) { $("text").focus(); return; }
+  await post("/api/tasks", { text, source: S && S.draft && text === S.draft ? "voice" : "typed" });
+  $("text").value = "";
+}
+$("run").onclick = run;
+$("form").onsubmit = (e) => { e.preventDefault(); run(); };
+$("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); run(); } });
+$("stop").onclick = () => post("/api/stop");
+$("clear").onclick = () => { post("/api/clear"); $("feed").innerHTML = '<div class="sub">Cleared.</div>'; };
+$("undo").onclick = () => post("/api/undo-moves");
+$("pointask").onclick = async () => {
+  const text = $("text").value.trim(), b = $("pointask");
+  if (!text) { $("text").placeholder = "Type a question first, e.g. What does this button do?"; $("text").focus(); return; }
+  b.disabled = true;
+  for (let n = 3; n > 0; n--) { b.textContent = `Point now… ${n}`; await new Promise((r) => setTimeout(r, 1000)); }
+  b.textContent = "Looking…";
+  const r = await post("/api/ask", { text, delayMs: 0 }).catch(() => ({}));
+  if (r.error) line(`<b>ask</b>: ${esc(r.error)}`, "#8a8f98", "bad"); else $("text").value = "";
+  b.textContent = "Point & ask"; b.disabled = false;
+};
+
+// ---------- the state ----------
+function render() {
+  const s = S;
+  $("kTs").className = "pill" + (s.deciders.jev ? "" : " off"); $("kTs").textContent = "TypeSafe " + (s.deciders.jev ? "✓" : "missing");
+  $("kAn").className = "pill" + (s.deciders.claude ? "" : " off"); $("kAn").textContent = "Anthropic " + (s.deciders.claude ? "✓" : "missing");
+  if (!$("vdot").classList.contains("live") && !$("vdot").classList.contains("busy")) $("vin").textContent = s.voice.replace(/;.*$/, "");
+  $("vin").parentElement.title = s.voice;
+  $("vout").textContent = "voice: " + s.voiceOut + (s.credits != null ? ` · ${s.credits.toLocaleString()} credits left` : "");
+  $("vout").title = s.voiceOut === "ElevenLabs" ? "Answers are spoken with ElevenLabs (ELEVENLABS_API_KEY)" : "Add ELEVENLABS_API_KEY to .env for a natural voice (free plan: 10,000 credits a month)";
+  if (s.fastLane) {
+    const f = s.fastLane;
+    $("fast").style.display = "";
+    $("fast").className = "pill" + (f.on ? "" : " off");
+    $("fast").textContent = f.on ? `fast lane ✓ · ${f.fast} direct · ${f.cua} via Cua` : "fast lane off";
+    $("fast").title = f.on ? "Presses and text go straight through UI Automation (a few ms each); Cua does the rest" : f.reason;
+  }
   const key = /^hold (.+?) and talk/.exec(s.voice)?.[1];
-  if (key) $("voicehint").textContent = `Type, or hold ${key} and talk. Point the mouse at anything and ask "what is this?", "where is save?" or "circle the zebra". Typed questions about the screen ("what am I looking at?") use the window you were in.`;
-  $("notices").replaceChildren(...s.notices.map(n => el("div", { className: `notice ${n.level}`, textContent: n.text })));
+  if (key) $("keysHint").textContent = `Or hold ${key} and talk (tap it to type): ask about anything on your screen, or give the agents a job.`;
+  $("notices").innerHTML = s.notices.map((n) => `<div class="notice ${esc(n.level)}">${esc(n.text)}</div>`).join("");
   if (s.draft && s.draft !== lastDraft) { $("text").value = s.draft; $("text").focus(); }
   lastDraft = s.draft;
-
-  $("approvals").replaceChildren(...s.approvals.map(a => el("div", { className: "approval" },
-    el("div", {}, el("b", { textContent: "Needs your approval: " }), document.createTextNode(a.action)),
-    el("div", { className: "evidence", textContent: a.why }),
-    el("div", { className: "row", style: "margin-top:8px" },
-      el("button", { className: "primary", textContent: "Approve", onclick: () => post(`/api/approvals/${a.id}`, { approve: true }) }),
-      el("button", { className: "danger", textContent: "Deny", onclick: () => post(`/api/approvals/${a.id}`, { approve: false }) })))));
-
-  const tasks = [...s.tasks].reverse();
-  $("tasks").replaceChildren(...(tasks.length ? tasks.map(t => {
-    const live = s.running.includes(t.id);
-    const box = el("div", { className: "task" },
-      el("div", { className: "row spread" }, el("span", { className: "instr", textContent: t.instruction }),
-        el("span", { className: "row" },
-          ...(live ? [el("button", { className: "danger", textContent: "Stop", title: "Stop this task only", onclick: () => post("/api/stop", { taskId: t.id }) })] : []),
-          el("span", { className: `pill ${t.status}`, textContent: t.status }))));
-    if (live && s.progress?.[t.id]) box.append(el("div", { className: "progress", textContent: s.progress[t.id] }));
-    if (t.result) {
-      box.append(el("div", { className: "answer", textContent: t.result.answer }));
-      if (t.result.evidence) box.append(el("div", { className: "evidence", textContent: `Evidence on screen: ${t.result.evidence}` }));
-    }
-    if (t.exception && t.status !== "partial") box.append(el("div", { className: "reason", textContent: `${t.exception.code.replace("_", " ")}: ${t.exception.reason}` }));
-    if (t.endedAt) {
-      const c = t.counts, secs = ((Date.parse(t.endedAt) - Date.parse(t.startedAt)) / 1000).toFixed(1);
-      box.append(el("div", { className: "meta", textContent: `${secs} s · ${c.steps} steps · jev ${c.jev} calls, Claude ${c.claude} · ${c.gui} GUI actions${c.files ? ` · ${c.files} file actions` : ""} · ${c.approvals} approvals · cost $${(t.cost.jevUsd + t.cost.claudeUsd).toFixed(5)}` }));
-    }
-    return box;
-  }) : [el("p", { className: "hint", textContent: "No tasks yet." })]));
-  $("stop").disabled = !s.running.length && !s.tasks.some(t => t.status === "queued");
+  $("stop").disabled = !s.running.length && !s.tasks.some((t) => t.status === "queued");
   $("stop").textContent = s.running.length > 1 ? "Stop all" : "Stop";
-  $("undo").hidden = !s.canUndo;
-  $("undo").disabled = s.running.length > 0;
+  $("undo").hidden = !s.canUndo; $("undo").disabled = s.running.length > 0;
+  for (const a of s.agents) agents[a.id] = a;
+  renderApprovals(); renderAgents(); renderTasks(); renderRuns();
 }
 
-function feedLine(node, cls = "") {
+function renderApprovals() {
+  const box = $("approvals");
+  box.replaceChildren(...S.approvals.map((a) => {
+    const d = document.createElement("div");
+    d.className = "approval";
+    d.innerHTML = `<div><b>Needs your okay:</b> ${esc(a.action)}</div><div class="evidence">${esc(a.why)}</div><div class="row"><button class="primary">Approve</button><button class="danger">Deny</button></div>`;
+    const [yes, no] = d.querySelectorAll("button");
+    yes.onclick = () => post(`/api/approvals/${a.id}`, { approve: true });
+    no.onclick = () => post(`/api/approvals/${a.id}`, { approve: false });
+    return d;
+  }));
+}
+
+function renderAgents() {
+  // the running tasks' agents, then the latest finished ones (up to 9 cards)
+  const all = S.agents.slice().reverse();
+  const live = all.filter((a) => S.running.includes(a.taskId));
+  const shown = [...live, ...all.filter((a) => !S.running.includes(a.taskId)).slice(0, Math.max(0, 9 - live.length))].reverse();
+  $("runLbl").textContent = S.running.length ? `· ${S.running.length} task${S.running.length > 1 ? "s" : ""} running` : shown.length ? "· latest" : "";
+  if (!shown.length) { $("agents").innerHTML = '<div class="sub">No agents working yet.</div>'; return; }
+  $("agents").innerHTML = shown.map((a) => {
+    const ls = lastStep[a.id], d = ls && ls.decision;
+    const item = d && d.item != null && ls.items[d.item] ? ls.items[d.item].text : "";
+    const res = a.status === "done" ? `<div class="ans ok">✓ ${esc(a.answer || "done")}</div>` : a.status === "failed" ? `<div class="ans bad">✗ ${esc(a.reason || "")}</div>` : "";
+    const how = ls && ls.result && ls.result.route === "fast_lane" ? ' <span class="tag fast">fast lane</span>' : "";
+    return `<div class="agent" style="--c:${esc(a.colour)}">
+      <div class="t"><span class="badge"><i></i>${esc(a.name || "Agent")} · ${esc(a.app)}</span><span class="st ${esc(a.status)}">${esc(a.status)}</span></div>
+      <div class="goal">${esc(a.goal)}</div>
+      ${a.now && a.status !== "done" ? `<div class="now">now: ${esc(a.now)}</div>` : ""}
+      ${d && a.status === "running" ? `<div class="last">step ${ls.step}: <b>${esc(d.kind)}</b>${item ? " → " + esc(item) : ""} <span class="tag ${esc(d.backend)}">${esc(d.backend)}</span>${how}<div class="bars">${bar("kind", d.probs && d.probs.kind, d.backend === "jev" ? d.conf.kind : null)}${d.backend === "jev" && d.conf.item != null ? bar("item", null, d.conf.item) : ""}<span>${d.ms} ms</span></div></div>` : ""}
+      ${res}
+      <div class="meta"><span>${a.steps} step${a.steps === 1 ? "" : "s"}</span><span>${(a.seconds || 0).toFixed(1)} s</span>${a.hand ? `<span>${esc(a.hand)}</span>` : ""}</div></div>`;
+  }).join("");
+}
+
+function renderTasks() {
+  const tasks = S.tasks.slice().reverse();
+  if (!tasks.length) { $("tasks").innerHTML = '<div class="sub">No tasks yet.</div>'; return; }
+  $("tasks").replaceChildren(...tasks.map((t) => {
+    const live = S.running.includes(t.id);
+    const d = document.createElement("div");
+    d.className = "task";
+    d.innerHTML = `<div class="row spread" style="margin:0"><span class="instr">${esc(t.instruction)}</span><span class="row" style="margin:0">${live ? '<button class="small danger" title="Stop this task only">Stop</button>' : ""}<span class="st ${esc(t.status)}">${esc(t.status)}</span></span></div>
+      ${t.result ? `<div class="ans ${t.status === "partial" ? "" : "ok"}">${esc(t.result.answer)}</div>${t.result.evidence ? `<div class="evidence">Evidence: ${esc(t.result.evidence)}</div>` : ""}` : ""}
+      ${t.exception && t.status !== "partial" ? `<div class="ans bad">${esc(t.exception.code.replace(/_/g, " "))}: ${esc(t.exception.reason)}</div>` : ""}
+      ${t.endedAt ? `<div class="meta"><span>${secs(t)}</span><span>${t.counts.steps} steps</span><span>jev ${t.counts.jev} · Claude ${t.counts.claude}</span>${t.counts.files ? `<span>${t.counts.files} file actions</span>` : ""}<span>${t.counts.approvals} approvals</span><span>${money(t.cost.jevUsd + t.cost.claudeUsd)}</span></div>` : ""}`;
+    const stop = d.querySelector("button");
+    if (stop) stop.onclick = () => post("/api/stop", { taskId: t.id });
+    return d;
+  }));
+}
+
+function renderRuns() {
+  const done = S.tasks.filter((t) => t.endedAt).reverse();
+  $("runs").innerHTML = done.map((t) => {
+    const c = t.counts, brain = c.claude > c.jev ? "claude" : c.jev ? "jev" : "code";
+    return `<tr><td class="cmd" title="${esc(t.instruction)}">${esc(t.instruction)}</td>
+      <td><span class="tag ${brain}">${brain === "claude" ? "Claude" : brain}</span></td>
+      <td class="num">${esc(t.status)}</td><td class="num">${secs(t)}</td><td class="num" title="jev ${c.jev} · Claude ${c.claude} · ${c.steps} steps">${c.jev + c.claude}</td>
+      <td class="num" title="jev ${money(t.cost.jevUsd)} · Claude ${money(t.cost.claudeUsd)}"><b>${money(t.cost.jevUsd + t.cost.claudeUsd)}</b></td></tr>`;
+  }).join("") || '<tr><td colspan="6" class="sub">No finished tasks yet.</td></tr>';
+}
+
+// ---------- the live feed ----------
+function line(html, colour, cls = "", head = "") {
   const f = $("feed");
-  if (f.firstChild?.tagName === "P") f.replaceChildren();
-  f.append(el("div", { className: `ev ${cls}` }, node));
-  while (f.childElementCount > 500) f.firstChild.remove();
-  f.scrollTop = f.scrollHeight;
+  if (f.querySelector(":scope > .sub")) f.innerHTML = "";
+  f.insertAdjacentHTML("afterbegin", `<div class="ln ${cls}" style="--c:${esc(colour)}">${head ? `<div class="h">${head}</div>` : ""}${html}</div>`);
+  while (f.childElementCount > 400) f.lastElementChild.remove();
 }
-const txt = s => document.createTextNode(s);
-
-const where = sf => sf.kind === "browser" ? sf.url : sf.kind === "app" ? sf.app : sf.kind === "files" ? `files: ${sf.op.op}` : sf.kind === "document" ? `Word: ${sf.title}` : "answered directly";
-const partsOf = {};                   // task -> number of parts in its plan (several can run at the same time)
+const where = (sf) => sf.kind === "browser" ? sf.url : sf.kind === "app" ? sf.app : sf.kind === "files" ? `files: ${sf.op.op}` : sf.kind === "document" ? `Word: ${sf.title}` : "answered directly";
 function onLog(l) {
-  if (l.type === "task_start") feedLine(txt(`▶ ${l.task.instruction}  (deciders: ${l.deciders.join(" + ") || "none"})`), "dim");
+  const grey = "#8a8f98";
+  if (l.type === "agent") { agents[l.agent.id] = l.agent; if (S) renderAgents(); return; }
+  if (l.type === "task_start") line(`▶ ${esc(l.task.instruction)}`, grey, "", `<span>new task</span><span>deciders: ${esc(l.deciders.join(" + ") || "none")}</span>`);
   else if (l.type === "plan") {
-    if (l.plan.question) feedLine(txt(`plan: needs more information: ${l.plan.question}`), "warn");
-    else if (l.plan.aboutScreen) feedLine(txt(`plan (${l.plan.by}): a question about your screen → answered from the window`), "dim");
+    if (l.plan.question) line(`needs more information: ${esc(l.plan.question)}`, grey, "warn", `<span>plan (${esc(l.plan.by)})</span>`);
+    else if (l.plan.aboutScreen) line("a question about your screen → explain mode", grey, "", `<span>plan (${esc(l.plan.by)})</span>`);
     else {
-      partsOf[l.taskId] = l.plan.subtasks.length;
-      l.plan.subtasks.forEach((s, i) => feedLine(txt(`plan ${i + 1} (${l.plan.by}): ${where(s.surface)} → ${s.goal}${s.values.length ? `  [texts: ${s.values.map(v => v.name).join(", ")}]` : ""}${s.check ? "  [checked in code]" : ""}${s.needsPrevious || s.usePreviousAnswer ? "  [after the parts before it]" : ""}`), "dim"));
+      parts[l.taskId] = l.plan.subtasks.length;
+      line(l.plan.subtasks.map((s, i) => `${i + 1}. ${esc(where(s.surface))} → ${esc(s.goal)}${s.needsPrevious || s.usePreviousAnswer ? " <span class=\"sub\">(after the parts before it)</span>" : ""}`).join("<br>"), grey, "", `<span>plan (${esc(l.plan.by)}) · ${l.plan.subtasks.length} part${l.plan.subtasks.length > 1 ? "s" : ""}</span><span>${l.ms} ms</span>`);
     }
   } else if (l.type === "step") {
-    const d = l.decision, it = d.item !== undefined ? l.items[d.item] : null;
-    const who = el("span", { className: `who ${d.backend}`, textContent: d.backend });
-    const p = d.backend === "jev" ? ` gate ${d.gate.toFixed(2)}` : "";
-    const what = it ? ` '${it.text}'` : "";
-    const extra = d.kind === "type" && l.acted?.text !== undefined ? ` ← ${JSON.stringify(l.acted.text.slice(0, 60))}` : l.acted?.url ? ` ${l.acted.url}` : "";
-    const res = l.result ? (l.result.ok ? ` · ${l.ms.act} ms` : ` · refused: ${l.result.error?.code}`) : "";
-    const why = d.backend === "claude" && d.why ? `  (${d.why})` : "";
-    const part = partsOf[l.taskId] > 1 ? `part ${l.sub + 1} ` : "";
-    const node = el("span", {}, who, txt(`${part}#${l.step} ${d.kind}${what}${extra}${p}${res}${l.note ? ` · ${l.note}` : ""}${why}`));
-    feedLine(node, l.result && !l.result.ok ? "bad" : "");
-  } else if (l.type === "approval") feedLine(txt(`approval ${l.approved ? "given" : "denied"}: ${l.request.action}`), l.approved ? "good" : "warn");
-  else if (l.type === "verify") feedLine(txt(`check (${l.by}): ${l.complete ? "done" : "not done yet"} — ${l.evidence}`), l.complete ? "good" : "warn");
-  else if (l.type === "files") feedLine(txt(`files: ${l.results.length ? `${l.results.filter(r => r.ok).length}/${l.results.length} done — ${l.results.slice(0, 3).map(r => r.detail).join("; ")}` : "looked, nothing changed"}`), l.results.every(r => r.ok) ? "good" : "bad");
-  else if (l.type === "ask") feedLine(txt(`ask (${l.by}): "${l.question}" — pointer on ${l.element ?? "nothing readable"}${l.window ? ` in "${l.window}"` : ""} → ${l.answer}${l.pointedAt ? `  [cursor moved to ${l.pointedAt}]` : ""} · ${l.ms} ms`), "good");
-  else if (l.type === "task_end") feedLine(txt(`■ ${l.task.status}${l.task.status === "partial" ? `: ${l.task.result?.answer ?? ""}` : l.task.exception ? ` (${l.task.exception.code}): ${l.task.exception.reason}` : `: ${l.task.result?.answer ?? ""}`}`), l.task.status === "done" ? "good" : l.task.status === "partial" ? "warn" : "bad");
+    const id = `${l.taskId}/${l.sub}`;
+    lastStep[id] = l;
+    const d = l.decision, it = d.item != null ? l.items[d.item] : null, a = agents[id];
+    const extra = d.kind === "type" && l.acted && l.acted.text !== undefined ? ` ← "${esc(l.acted.text.slice(0, 60))}"` : l.acted && l.acted.url ? ` ${esc(l.acted.url)}` : "";
+    const fast = l.result && l.result.route === "fast_lane" ? ' <span class="tag fast">fast lane</span>' : "";
+    const res = l.result && !l.result.ok ? ` · refused: ${esc(l.result.error && l.result.error.code)}` : "";
+    const why = d.backend === "claude" && d.why ? ` <span class="sub">(${esc(d.why)})</span>` : "";
+    line(`<b>${esc(d.kind)}</b>${it ? " → " + esc(it.text) : ""}${extra}${fast}${res}${l.note ? ` · ${esc(l.note)}` : ""}${why}`, col(id), l.result && !l.result.ok ? "bad" : "",
+      `<span>${esc(a ? a.name + " · " + a.app : parts[l.taskId] > 1 ? "part " + (l.sub + 1) : "agent")} · step ${l.step} · <span class="tag ${esc(d.backend)}">${esc(d.backend)}</span>${d.backend === "jev" ? " gate " + d.gate.toFixed(2) : ""}</span><span>decide ${d.ms} ms · act ${l.ms.act} ms</span>`);
+    if (S) renderAgents();
+  } else if (l.type === "approval") line(`${l.approved ? "approved" : "denied"}: ${esc(l.request.action)}`, grey, l.approved ? "good" : "warn");
+  else if (l.type === "verify") line(`${l.complete ? "done" : "not done yet"}: ${esc(l.evidence)}`, col(`${l.taskId}/${l.sub}`), l.complete ? "good" : "warn", `<span>check (${esc(l.by)})</span><span>${l.ms} ms</span>`);
+  else if (l.type === "files") line(l.results.length ? `${l.results.filter((r) => r.ok).length}/${l.results.length} done: ${esc(l.results.slice(0, 3).map((r) => r.detail).join("; "))}` : "looked, nothing changed", col(`${l.taskId}/${l.sub}`), l.results.every((r) => r.ok) ? "good" : "bad", "<span>files</span>");
+  else if (l.type === "ask") line(`"${esc(l.question)}" → ${esc(l.answer)}`, "#33d499", "", `<span>explain (${esc(l.by)})${l.window ? ` · ${esc(l.window)}` : ""}</span><span>${l.ms} ms</span>`);
+  else if (l.type === "task_end") {
+    const t = l.task;
+    line(t.status === "done" ? "✓ " + esc((t.result && t.result.answer) || "done") : t.status === "partial" ? esc((t.result && t.result.answer) || "") : "✗ " + esc(t.exception ? t.exception.reason : t.status),
+      grey, t.status === "done" ? "good" : t.status === "partial" ? "warn" : "bad", `<span>finished: ${esc(t.instruction.slice(0, 60))}</span><span>${secs(t)}</span>`);
+  }
 }
 
 function onVoice(v) {
-  const dot = $("vdot"), t = $("vtext");
-  if (v.event === "down") { dot.className = "dot live"; t.textContent = "listening… (point at what you mean)"; }
+  const dot = $("vdot"), t = $("vin");
+  if (v.event === "down") { dot.className = "dot live"; t.textContent = "listening… point at what you mean"; }
   else if (v.event === "up") { dot.className = "dot busy"; t.textContent = "transcribing…"; }
-  else { dot.className = "dot"; t.textContent = state?.voice ?? "voice"; }
+  else { dot.className = "dot"; t.textContent = S ? S.voice.replace(/;.*$/, "") : "voice"; }
 }
 
 const es = new EventSource("/events");
-es.onmessage = m => {
+es.onmessage = (m) => {
   const e = JSON.parse(m.data);
-  if (e.type === "state") renderState(e.state);
+  if (e.type === "state") { S = e.state; render(); }
   else if (e.type === "voice") onVoice(e.voice);
   else if (e.type === "status") $("status").textContent = e.text;
   else onLog(e);
 };
 
-$("form").onsubmit = async ev => {
-  ev.preventDefault();
-  const text = $("text").value.trim();
-  if (!text) return;
-  await post("/api/tasks", { text, source: state?.draft && text === state.draft ? "voice" : "typed" });
-  $("text").value = "";
-};
-$("text").addEventListener("keydown", ev => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); $("form").requestSubmit(); } });
-for (const b of document.querySelectorAll(".examples button")) b.onclick = () => { $("text").value = b.textContent; $("text").focus(); };
-$("pointask").onclick = async () => {
-  const text = $("text").value.trim(), b = $("pointask");
-  if (!text) { $("text").placeholder = "Type a question first, e.g. What does this button do?"; $("text").focus(); return; }
-  b.disabled = true;
-  for (let n = 3; n > 0; n--) { b.textContent = `Point now… ${n}`; await new Promise(r => setTimeout(r, 1000)); }
-  b.textContent = "Looking…";
-  const r = await post("/api/ask", { text, delayMs: 0 }).catch(() => ({}));
-  if (r.error) feedLine(txt(`ask: ${r.error}`), "bad"); else $("text").value = "";
-  b.textContent = "Point & ask"; b.disabled = false;
-};
-$("stop").onclick = () => post("/api/stop");
-$("clear").onclick = () => post("/api/clear");
-$("undo").onclick = () => post("/api/undo-moves");
-
-fetch("/api/runs").then(r => r.json()).then(runs => { for (const r of runs) $("runs").append(el("option", { value: r, textContent: r })); });
-$("runs").onchange = async () => {
-  const id = $("runs").value; if (!id) return;
+fetch("/api/runs").then((r) => r.json()).then((runs) => { for (const r of runs) $("past").insertAdjacentHTML("beforeend", `<option value="${esc(r)}">${esc(r)}</option>`); });
+$("past").onchange = async () => {
+  const id = $("past").value; if (!id) return;
   const text = await (await fetch(`/api/runs/${id}`)).text();
-  $("feed").replaceChildren();
-  for (const line of text.split("\n")) if (line) onLog(JSON.parse(line));
+  $("feed").innerHTML = "";
+  for (const l of text.split("\n")) if (l) onLog(JSON.parse(l));
 };
 </script>
 </body>

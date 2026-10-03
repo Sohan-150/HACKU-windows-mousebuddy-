@@ -1,17 +1,21 @@
-# Background Agent
+# Backstage for Windows
 
-A desktop assistant that does what you ask, behind your windows. Type an instruction, or **hold Ctrl+Win and say it**. It
-works in its own browser window (a throwaway profile), in desktop apps through the accessibility interface, or directly
-on files in your user folder. **Point the mouse at something and ask** "what is this?" or "where is the save button?" and,
-like [Clicky](https://clicky.foo), it answers out loud, glides its own coloured cursor to the control and circles it.
+A desktop assistant that does what you ask, behind your windows: the Windows twin of the team's Mac version (Backstage),
+with its look, colours and behaviour. Type an instruction, or **hold Ctrl+Win and say it** (tap the keys to type it
+instead). Coloured agents work in their own browser windows (a throwaway profile), in desktop apps through UI
+Automation, or directly on files in your user folder, each with a little widget in the corner of your screen. **Ask about
+anything on your screen** ("what is this?", "how do I make a pivot table?", "circle the zebra") and it answers out loud
+while it draws on top of your screen; "how do I..." becomes a short lesson, one step at a time.
 
 Every task ends **done, with the answer and the evidence it was read from**, or **failed, with a reason**.
 
 - **TypeSafe jev** decides almost every step: a cheap, fast classifier (about $0.0003 per task above). With rules it also
   plans the common tasks, so the agent runs on the jev key alone.
 - **Claude** (optional) plans open-ended tasks, takes over steps jev is unsure about, writes text nobody planned, checks
-  results, and answers point-and-ask questions from a screenshot. Default model `claude-sonnet-5-5`; `claude-haiku-4-5`
-  is cheaper (`CLAUDE_MODEL` in `.env`).
+  results, and runs explain mode (a picture of your screen plus its controls). Default model `claude-sonnet-5-5`;
+  `claude-haiku-4-5` is cheaper (`CLAUDE_MODEL` in `.env`).
+- **ElevenLabs** (optional) speaks the answers in a natural voice (free plan: 10,000 credits a month); otherwise the
+  Windows voice does.
 
 Measured runs are in [evidence/live-jev-only.md](evidence/live-jev-only.md). Windows and Mac notes are in
 [../BUILD-WINDOWS-AND-MAC.md](../BUILD-WINDOWS-AND-MAC.md).
@@ -32,13 +36,14 @@ Measured runs are in [evidence/live-jev-only.md](evidence/live-jev-only.md). Win
 | "Find flights to Botswana and at the same time play Drake on Spotify" | parts that don't need each other run at once (two browser windows, two desktop apps); one that fails doesn't stop the others |
 | "Launch Fortnite from Epic Games" | started with the launcher's own link (Steam too); an update or sign-in it needs is reported |
 | "Open my coding folder and tell me what is inside" | found by name, opened in File Explorer, its folders and files listed |
-| Point + "what is this?" / "where is settings?" / "read this" | answered from the window under the pointer; the control is circled |
+| Point + "what is this?" / "where is settings?" / "read this" | explain mode: the control under the pointer is named (and ringed for "where is") |
 | "Where is my Year 1 folder?", "open my tax return" | searched on disk by name ("one" = "1", case and spaces ignored); shown in File Explorer |
 
 With a Claude key it also composes text ("write a thank-you note"), takes on open-ended web tasks (search, compare,
-go as far as the page before payment: tested with a real flight to Taipei), explains what you point at from a
-screenshot, answers "how do I …" questions about the app you are pointing at (tutor style), and can point at things
-that are not in the accessibility list. Tested live with Sonnet 5.5 and Haiku 4.5; see the evidence file.
+go as far as the page before payment: tested with a real flight to Taipei), and explain mode answers anything about
+your screen: it draws rings, boxes, circles, arrows, underlines and labels on top of it, and teaches "how do I ..." as a
+lesson (one action per step; say "next" or press Alt+Right). Tested live with Sonnet 5.5 and Haiku 4.5; see the
+evidence file.
 
 ## Safety, in code (whatever a model decides)
 
@@ -47,8 +52,11 @@ that are not in the accessibility list. Tested live with Sonnet 5.5 and Haiku 4.
 - Never types into password, card or ID fields; never completes a purchase or booking.
 - Files: only inside your user folder, never deleted, never overwritten (`a (1).txt`), every move undoable.
 - Existing text in an app is never replaced silently: it opens a new tab, or asks.
-- Point-and-ask is read-only. Its cursor is the agent's overlay; the marks are click-through, and neither they nor the
-  bubble ever take focus (0 foreground changes measured); your mouse is never moved.
+- Explain mode is read-only: it never clicks or types. The overlay (buddy, drawings, widgets) is click-through and never
+  takes focus, except the typing box you open and the widgets, which you can drag. Your mouse is never moved.
+- The fast lane acts only on the exact control the agent saw (same app, control type, name and position within 3
+  pixels), never types inside web pages, and reports typing as done only when the field really changed; anything else
+  goes through Cua. It never acts after it has been waiting, so a click is never done twice.
 - Say "stop" (or press Stop) to abort at the next step.
 
 ## Quick start: Windows
@@ -64,6 +72,9 @@ Run from a normal PowerShell, never as administrator.
    ```
 3. In this folder: `bun install`, copy `.env.example` to `.env`, put in `TYPESAFE_API_KEY` (and `ANTHROPIC_API_KEY` if you
    have one). Set `REGION` / `CURRENCY` (e.g. `HK` / `HKD`) so maps and flights are local.
+   For the natural voice (optional): sign up at [elevenlabs.io](https://elevenlabs.io) (the free plan gives 10,000
+   credits a month), create a key at <https://elevenlabs.io/app/settings/api-keys> with Text to Speech access, and put it
+   in `.env` as `ELEVENLABS_API_KEY=...`. The panel shows the credits left; below 300 it switches to the Windows voice.
 4. Voice (optional; typing always works). Needs [uv](https://docs.astral.sh/uv/):
    ```powershell
    uv venv --python 3.12 native\win\.venv
@@ -72,7 +83,9 @@ Run from a normal PowerShell, never as administrator.
    ```
    The first start downloads the `small` speech model (about 480 MB). Settings > Privacy > Microphone must allow desktop apps.
 5. `powershell -ExecutionPolicy Bypass -File scripts\start.ps1` starts the daemon, runs the preflight and opens the panel
-   at http://127.0.0.1:3000/. Or step by step: `scripts\daemon.ps1`, `bun run preflight`, `bun start`.
+   at http://127.0.0.1:3000/. Or step by step: `scripts\daemon.ps1`, `bun run preflight`, `bun start`. The daemon is
+   started with the Mac version's speed setting (300 ms window-change wait); if it was already running,
+   `scripts\daemon.ps1 -Restart` restarts it with it.
 
 The agent's own Chrome (or Edge) window opens at start-up and **takes the foreground once**; after that it works behind
 whatever you have in front (0 of 2,075 polls with it in front, measured).
@@ -84,28 +97,39 @@ voice helpers as in [native/mac/README.md](native/mac/README.md) (Right-Option);
 
 ## Using it
 
-- **Type** an instruction and press Enter, or click an example.
-- **Hold Ctrl+Win and talk** (`PTT_KEY` changes it: `ctrl_alt`, `ctrl_shift`, `right_ctrl`, `f8`...; the Fn key never
-  reaches Windows, so it cannot be used). The agent's cursor glides next to your pointer while it listens. Another key
-  (a shortcut such as Ctrl+Win+D), a click or a scroll cancels the recording. Release to run it. Answers are spoken
-  (`SPEAK=off` to silence). `VOICE_MODE=draft` puts what you said in the box instead of running it.
-- **Answers on the screen**: a small bubble shows "Listening…", "Thinking…", the answer (next to your pointer for
-  point-and-ask, bottom right otherwise), what every running task is doing step by step (and what it is waiting for),
-  approvals and the result of every task, so you never have to switch to the panel. Each part of a task has its own
-  line ("part 2 (Spotify): step 3: clicked 'Play Drake'", then "✓ ..."). Drag it anywhere and later bubbles appear
-  there; it stays while the mouse is on it; click it to close it (progress stays away until a task starts or ends). It
-  never takes focus (`BUBBLE=off` to turn it off).
+- **One hotkey for everything.** Hold Ctrl+Win, point, talk, let go (`PTT_KEY` changes the keys: `ctrl_alt`,
+  `ctrl_shift`, `right_ctrl`, `f8`...; the Fn key never reaches Windows). **Tap** the keys instead to get a typing box
+  next to the cursor. A job ("open Calculator and work out 128 times 37") goes to the agents: "On it.", then the result
+  is said when they finish. A question about the screen goes to explain mode. Clear cases are told apart in code, an
+  unclear one by jev; when in doubt it explains, because explaining never changes anything (`src/router.ts`).
+  "Stop" stops the agents. `VOICE_MODE=draft` puts a spoken job in the panel's box instead of running it.
+- **Explain mode.** The screen under the cursor is captured the moment the keys go down (the overlay's own windows are
+  never in the picture). Claude gets the picture plus the controls on screen with their exact positions, so the drawings
+  land on the real button, not a guess. Plain questions get one answer that fades; "how do I..." gets a lesson: Alt+Right
+  or "next" for the next step, Alt+Left or "back", "repeat". Esc stops the voice; Esc again clears the drawings. Without
+  Claude, jev names what is under the pointer and rings what "where is ..." asks for. Typed in the panel, screen
+  questions are about the window you were using before the panel; or type one, press **Point & ask**, and point within
+  3 seconds.
+- **The buddy and the widgets.** A small buddy follows your cursor and shows listening / thinking / the answer, then
+  flies to what it is explaining. While agents work, each has a widget in the bottom-right corner (drag them anywhere):
+  its colour, its app, what it is doing now, a running clock and its result; parts waiting for a browser window or app
+  say so. Every press or text insert flashes a ring in the agent's colour where it happened. The tray icon has Ask,
+  Clear drawings, Stop the agents, Hide the buddy when idle, and Quit (`OVERLAY=off` turns the overlay off).
+- **Voice.** Answers are spoken with ElevenLabs when `ELEVENLABS_API_KEY` is set (the first sentence is fetched on its
+  own so speech starts in about half a second; the next lesson step is fetched while you listen), else with the Windows
+  voice. Any failure, a bad key or low credits falls back to the Windows voice.
 - **Several tasks at once**: a new task starts right away. Tasks share the computer: two browser windows (the second
-  opens the first time two web parts run at once), two hands for desktop apps (each its own cursor colour), Word and
-  your files. Parts that need different things run at the same time; two parts in the same app, or a third web part,
-  wait their turn (the bubble and the panel say so). Each running task has its own **Stop**.
-- **Point and ask**: hold Ctrl+Win, point at something, ask "what is this?", "what does this button do?", "where is
-  print?", "read this" (with Claude also "how do I make a pivot table?", "circle the zebra and the hippo", "what am I
-  looking at?"). The answer is spoken; what it talks about is marked with rings, boxes, arrows or underlines, each with
-  its own colour and a label (`HIGHLIGHT=off` to turn them off). Typed in the panel, the same questions are about the
-  window you were using before the panel. Or type the question, press **Point & ask**, and point within 3 seconds.
-- **Approvals** appear at the top of the panel and in the bubble; with voice, hold Ctrl+Win and say "yes" or "no".
-- **Stop** (all tasks; each task also has its own), **Clear**, **Undo last file moves**, and **Replay a past run** (from
+  opens the first time two web parts run at once), two hands for desktop apps (Red and Purple), Word and your files.
+  Parts that need different things run at the same time; two parts in the same app, or a third web part, wait their
+  turn (their widgets say so). Each running task has its own **Stop**.
+- **Fast lane.** Presses and text in desktop apps go straight through UI Automation (Invoke, Toggle, Select, Value: built
+  into Windows, a few milliseconds each) instead of Cua's single input lane (about 0.6 s each), so agents in different
+  apps really act at the same time. Anything it can't do safely goes through Cua (`FAST_INPUT=off` turns it off). The
+  panel shows how many actions went each way.
+- **Approvals** appear at the top of the panel and are said out loud; hold Ctrl+Win and say "yes" or "no", or click.
+- **The panel** (the Mac version's design): command box with examples, agent cards with each one's colour, live steps
+  (who decided each one: jev or Claude, and whether it went through the fast lane), tasks with their answers and
+  evidence, cost and speed per task, **Undo last file moves**, and **Replay a past run** (from
   `runs/<runId>/steps.jsonl`).
 
 ## How a task runs
@@ -132,10 +156,14 @@ voice helpers as in [native/mac/README.md](native/mac/README.md) (Right-Option);
 | `src/lanes.ts` | what each part needs to itself (an app, Word, files, then a browser window or an app hand) and taking turns for it |
 | `src/planner.ts` | jev + rules planning (search, flights, directions, weather, calculator, text, files) |
 | `src/jev.ts`, `src/claude.ts` | the two deciders |
-| `src/pointer.ts`, `src/ask.ts`, `src/overlay.ts`, `native/win/overlay.ps1` | point-and-ask: window and control under the pointer (or behind the panel), the answer, pointing back, the marks and the answer bubble |
+| `src/router.ts` | the hotkey's words: a job for the agents, or a question for explain mode |
+| `src/explain.ts`, `src/pointer.ts`, `src/ask.ts` | explain mode: the screen and its controls, Claude's answer placed on real controls, lessons; jev's answer without Claude |
+| `src/overlay.ts`, `native/win/overlay.ps1` | the overlay: buddy, drawings, agents' widgets, flashes, typing box, keys, tray, screen capture, playing the voice |
+| `src/voice.ts`, `src/results.ts` | ElevenLabs with the Windows voice as fallback; results tidied for the widgets and made sayable |
+| `src/fastlane.ts`, `native/win/fastlane.ps1` | the fast lane: presses and text straight through UI Automation |
 | `src/files.ts`, `src/safety.ts` | file operations (preview, run, check, undo); approval and secret-field rules |
 | `src/driver/win.ts`, `mac.ts`, `sim.ts` | Cua on Windows (browser route + UI Automation), macOS (untested), simulator for tests |
-| `src/server.ts`, `viewer/index.html` | panel, task queue, approvals, voice routing, conversation memory |
+| `src/server.ts`, `viewer/index.html` | panel, tasks, approvals, the hotkey and the overlay, conversation memory |
 | `src/intake/index.ts`, `native/win/voice.py`, `native/mac/*`, `src/speak.ts` | hold-to-talk, on-device speech, spoken answers |
 
 `bun test` runs the tests (simulated desktop, mocked deciders, real file conversions, a recorded voice clip). The
@@ -146,14 +174,17 @@ image and PDF conversion tests need Windows (System.Drawing, Chrome or Edge).
 
 - Audio: never. Speech-to-text runs on the laptop (faster-whisper on Windows, SpeechTranscriber on the Mac).
 - To TypeSafe: the instruction, the window's control labels and visible text, once per step.
-- To Anthropic (only with a key): the same, and for point-and-ask a screenshot of **the one window you point at**
-  (Clicky sends all monitors; this sends one window on purpose).
+- To Anthropic (only with a key): the same, and for explain mode one picture of **the screen under your cursor** (one
+  monitor, scaled to at most 1568 pixels, the overlay never in it) with the labels of the controls on it, taken only
+  when you press the talk keys or ask. Typed in the panel: only the window you were using. The picture is deleted after
+  the answer; `runs/explain-journal.jsonl` keeps only the text.
+- To ElevenLabs (only with a key): the text of the answers to be spoken.
 - Files are processed on the laptop.
 
 ## Honest limits
 
-- Electron apps (Slack, Discord, the Claude app) show few controls to accessibility tools, so point-and-ask without
-  Claude can only name the window there.
+- Electron apps (Slack, Discord, the Claude app) show few controls to accessibility tools, so explain mode without
+  Claude can only name the window there, and the fast lane leaves them to Cua.
 - The agent's browser is not signed in anywhere, so mail, calendars and shopping carts need you.
 - jev alone does well when the plan is clear; open-ended multi-page tasks need Claude.
 - Two browser windows and two app hands: a third web part (or third app) waits for one to be free, and two parts in
@@ -163,7 +194,8 @@ image and PDF conversion tests need Windows (System.Drawing, Chrome or Edge).
 
 ## Credits
 
-Built during HacKU 2026. Used, with thanks: **Hands** by lithdew / team PUK (inspiration), **awlevin/typesafe-computer-use**
+Built during HacKU 2026; the design, colours, explain mode, router, voice and fast lane follow the team's Mac version
+(Backstage). Used, with thanks: **Hands** by lithdew / team PUK (inspiration), **awlevin/typesafe-computer-use**
 (MIT; classifier-per-step loop, gate rule), **Cua Driver** by trycua (MIT), **TypeSafe jev** (`@typesafe-ai/sdk` 0.6.0),
-**Anthropic Claude** (`@anthropic-ai/sdk`), **faster-whisper** (MIT) with OpenAI Whisper models, **sounddevice**,
+**Anthropic Claude** (`@anthropic-ai/sdk`), **ElevenLabs** (text to speech), **faster-whisper** (MIT) with OpenAI Whisper models, **sounddevice**,
 **pynput**, **wttr.in**. `native/mac/*.swift` are by the team's Mac owner.

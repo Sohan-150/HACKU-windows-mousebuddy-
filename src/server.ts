@@ -15,7 +15,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { newTask, runTask, type ClaudeLike, type JevLike } from "./agent";
 import type { Claude, Turn } from "./claude";
-import type { AgentState, ApprovalRequest, Driver, FileAction, HandName, LogLine, Task } from "./contracts";
+import { AGENT_COLOURS, type AgentState, type ApprovalRequest, type Driver, type FileAction, type HandName, type LogLine, type Task } from "./contracts";
 import { behindPanel, Explainer, type Capture, type ExplainResult, type OverlaySend } from "./explain";
 import type { VoiceEvent } from "./intake";
 import { undoMoves } from "./files";
@@ -44,8 +44,9 @@ export interface AppOptions { send?: OverlaySend; capture?: (cursor?: Point) => 
 
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 const POINTER_HAND: HandName = "Blue-9";      // its own Cua session for reading windows, so asks never disturb a running task
-// The panel's browser window (viewer/index.html <title>): never what a typed question is about.
-const PANEL_TITLE = /^(Backstage Panel|Background Agent)\b/;
+// The panel's browser window (viewer/index.html <title> "Backstage", then " - Google Chrome" etc.): never what a typed
+// question is about. ("Background Agent" was its old title.)
+export const PANEL_TITLE = /^Backstage(\s+[-\u2013\u2014]\s+|$)|^Background Agent\b/;
 const YES = /^(yes|yeah|yep|approve|approved|go ahead|do it|ok(ay)?|sure)\b/i, NO = /^(no|nope|deny|denied|don'?t|do not)\b/i;
 const KEEP_FINISHED_MS = 20_000;              // a finished agent's widget stays this long while others still work
 
@@ -72,6 +73,7 @@ export class App {
   private stateTimer?: Timer;
   private fromHotkey = new Set<string>();   // tasks started with the talk keys: their result is said out loud
   private clients = new Set<(e: AppEvent) => void>();
+  private lines: LogLine[] = [];          // the latest log lines, for a panel that opens later (like the Mac version)
 
   constructor(public driver: Driver, public claude: AppClaude | null, public jev: AppJev | null, public hand: HandName = "Mint-3", opts: AppOptions = {}) {
     this.send = opts.send ?? overlaySend;
@@ -81,6 +83,8 @@ export class App {
       conversation: () => this.turns.slice(-5), ready: () => this.driver.ensureSession(POINTER_HAND),
     });
     this.behind = opts.behindPanel ?? (async () => { await this.driver.ensureSession(POINTER_HAND).catch(() => {}); return behindPanel(POINTER_HAND, PANEL_TITLE); });
+    // every press or text insert flashes in the agent's colour where it happened (fast-lane actions have no Cua cursor)
+    this.driver.onAction = n => { this.send({ cmd: "tap", colour: AGENT_COLOURS[n.hand] ?? "#2bb39a", kind: n.kind, via: n.via, ...n.frame }); };
   }
 
   get desktop(): boolean { return this.driver.caps.platform !== "sim"; }
@@ -92,10 +96,14 @@ export class App {
       deciders: { jev: !!this.jev, claude: !!this.claude }, driver: this.driver.caps.name, notices: this.notices.slice(-4),
       voice: this.voiceInfo, voiceOut: this.explainer.voice.name, credits: this.explainer.voice.credits ?? null,
       voiceMode: this.voiceMode, draft: this.draft, canUndo: !!this.lastMoves,
+      fastLane: this.driver.fastLane?.() ?? null, colours: AGENT_COLOURS,
     };
   }
   get busy(): boolean { return this.running.size > 0; }
-  emit(e: AppEvent) { for (const f of this.clients) f(e); }
+  emit(e: AppEvent) {
+    if (e.type !== "state" && e.type !== "voice" && e.type !== "status") { this.lines.push(e); if (this.lines.length > 300) this.lines.shift(); }
+    for (const f of this.clients) f(e);
+  }
   pushState() { clearTimeout(this.stateTimer); this.stateTimer = undefined; this.emit({ type: "state", state: this.snapshot() }); }
   /** many agent updates a second: the panel gets at most four states a second */
   private pushStateSoon() { this.stateTimer ??= setTimeout(() => this.pushState(), 250); }
@@ -362,6 +370,7 @@ export class App {
     this.tasks = this.tasks.filter(t => this.running.has(t.id));
     for (const [id, a] of this.agents) if (!this.running.has(a.taskId)) this.agents.delete(id);
     this.notices = this.notices.filter(n => n.level === "error");
+    this.lines = [];
     this.pushState();
   }
 
@@ -381,6 +390,7 @@ export class App {
               send = e => { try { ctrl.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`)); } catch { this.clients.delete(send); } };
               this.clients.add(send);
               send({ type: "state", state: this.snapshot() });
+              for (const l of this.lines.slice(-200)) send(l);
             },
             cancel: () => { this.clients.delete(send); },
           });

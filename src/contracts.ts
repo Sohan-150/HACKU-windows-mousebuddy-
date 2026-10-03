@@ -99,7 +99,13 @@ export interface Driver {
   followActiveTab?(hand: HandName, w: WindowRef): Promise<WindowRef>;
   keepAlive?(hand: HandName): Promise<void>;
   endAll(): Promise<void>;
+  /** every press or text insert in an app, where it happened (the overlay flashes it in the hand's colour) */
+  onAction?: (n: ActionNote) => void;
+  /** the fast lane (UI Automation directly): on or off, and how many actions went which way */
+  fastLane?(): { on: boolean; reason: string; fast: number; cua: number; fellBack: number };
 }
+
+export interface ActionNote { hand: HandName; frame: { x: number; y: number; w: number; h: number }; kind: "press" | "type"; via: "fast" | "cua" }
 
 // ---------- perception + decisions ----------
 export interface Item {

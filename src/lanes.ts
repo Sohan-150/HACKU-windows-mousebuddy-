@@ -1,16 +1,16 @@
 // What a part of a task needs to itself while it runs. Parts (of one task or of several tasks) that need different
 // things run at the same time; parts that need the same thing take turns, first come first served.
-//   web part      -> one of the agent's browser windows (each is its own hand: Mint-3, then Gold-5)
-//   app part      -> that app (two parts never drive one app at once), then one of the app hands (Red-7, Violet-1)
+//   web part      -> one of the agent's browser windows (each is its own hand: Mint-3, then Cyan-5)
+//   app part      -> that app (two parts never drive one app at once), then one of the app hands (Red-7, Purple-1)
 //   Word document -> Word;  files -> the files
 // Locks are always taken in that order (an app before a hand), and hands are never waited for by someone holding one,
 // so nothing can deadlock.
 import type { HandName, Surface } from "./contracts";
 
-/** The agent's browser windows: Mint-3's opens at start-up, Gold-5's the first time two web parts run at once. */
-export const BROWSER_HANDS: HandName[] = ["Mint-3", "Gold-5"];
+/** The agent's browser windows: Mint-3's opens at start-up, Cyan-5's the first time two web parts run at once. */
+export const BROWSER_HANDS: HandName[] = ["Mint-3", "Cyan-5"];
 /** The hands that drive desktop apps, each with its own cursor colour. Blue-9 is point-and-ask's own. */
-export const APP_HANDS: HandName[] = ["Red-7", "Violet-1"];
+export const APP_HANDS: HandName[] = ["Red-7", "Purple-1"];
 
 export class Stopped extends Error { constructor() { super("stopped by you"); } }
 

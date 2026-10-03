@@ -51,6 +51,16 @@ if (process.env.TYPESAFE_API_KEY) {
   } catch (e) { line("FAIL", `TypeSafe unreachable: ${(e as Error).message}`, "check the network; without it Claude decides every step"); }
 } else line(process.env.ANTHROPIC_API_KEY ? "WARN" : "FAIL", "no TYPESAFE_API_KEY: Claude would decide every step (slower, costlier)", "put the key in .env");
 
+if (process.env.ELEVENLABS_API_KEY) {
+  try {
+    const r = await fetch("https://api.elevenlabs.io/v1/user/subscription", { headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY.trim() }, signal: AbortSignal.timeout(6000) });
+    const body = await r.text();
+    if (r.ok) { const j = JSON.parse(body); line("PASS", `ElevenLabs reachable (${j.tier}: ${j.character_limit - j.character_count} of ${j.character_limit} credits left this month)`); }
+    else if (r.status === 401 && /missing_permission/i.test(body)) line("PASS", "ElevenLabs key set (it can't read the quota, which is fine)");
+    else line("WARN", `ElevenLabs: HTTP ${r.status}; answers will use the Windows voice`, "check ELEVENLABS_API_KEY in .env (https://elevenlabs.io/app/settings/api-keys)");
+  } catch (e) { line("WARN", `ElevenLabs unreachable: ${(e as Error).message}; answers will use the Windows voice`, "check the network"); }
+} else line("WARN", "no ELEVENLABS_API_KEY: answers use the Windows voice", "optional: a free key (10,000 credits a month) at https://elevenlabs.io/app/settings/api-keys");
+
 if (process.platform === "win32" && process.env.VOICE !== "off") {
   const py = join(ROOT, "native", "win", ".venv", "Scripts", "python.exe");
   const model = process.env.WHISPER_MODEL ?? "small";

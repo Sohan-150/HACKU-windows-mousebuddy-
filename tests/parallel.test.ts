@@ -12,14 +12,13 @@ import { contents, planFiles } from "../src/files";
 import type { StepState } from "../src/jev";
 import { Locks, Stopped } from "../src/lanes";
 import { MemoryLogger } from "../src/logger";
-import { onBubbleClosed, readEvents } from "../src/overlay";
+import { asciiJson, captureScreen, onOverlay, readEvents, type OverlayEvent } from "../src/overlay";
 import { perceive } from "../src/perceive";
 import { findOp, splitParts } from "../src/planner";
 import { App } from "../src/server";
 
 process.env.SPEAK = "off";
-process.env.HIGHLIGHT = "off";
-process.env.BUBBLE = "off";
+process.env.OVERLAY = "off";
 
 const decision = (kind: Kind, item?: number, extra: Partial<Decision> = {}): Decision =>
   ({ kind, item, conf: { kind: 0.9, item: 0.9, value: 0.9 }, gate: 0.9, backend: "jev", model: "fake", inputTokens: 1, outputTokens: 0, ms: 1, ...extra });
@@ -74,15 +73,15 @@ const deps = (over: Record<string, unknown>) => ({ log: new MemoryLogger(), sign
 describe("locks", () => {
   test("the first free of several (two browser windows), and the next one in line gets the one let go", async () => {
     const locks = new Locks(), signal = new AbortController().signal;
-    const a = await locks.acquireAny(["hand:Mint-3", "hand:Gold-5"], "A", signal);
-    const b = await locks.acquireAny(["hand:Mint-3", "hand:Gold-5"], "B", signal);
-    expect([a.name, b.name]).toEqual(["hand:Mint-3", "hand:Gold-5"]);
+    const a = await locks.acquireAny(["hand:Mint-3", "hand:Cyan-5"], "A", signal);
+    const b = await locks.acquireAny(["hand:Mint-3", "hand:Cyan-5"], "B", signal);
+    expect([a.name, b.name]).toEqual(["hand:Mint-3", "hand:Cyan-5"]);
     let waitedFor = "";
-    const c = locks.acquireAny(["hand:Mint-3", "hand:Gold-5"], "C", signal, h => (waitedFor = h));
+    const c = locks.acquireAny(["hand:Mint-3", "hand:Cyan-5"], "C", signal, h => (waitedFor = h));
     expect(waitedFor).toBe("A");
     b.release();
-    expect((await c).name).toBe("hand:Gold-5");
-    expect(locks.holder("hand:Gold-5")).toBe("C");
+    expect((await c).name).toBe("hand:Cyan-5");
+    expect(locks.holder("hand:Cyan-5")).toBe("C");
   });
 
   test("one holder at a time, in the order asked, handed straight to the next", async () => {
@@ -173,7 +172,7 @@ describe("several desktop apps", () => {
     const t = await runTask(newTask("launch Fortnite at the same time play Drake on Spotify", "typed"), deps({ driver, jev, claude: claudeFor(() => plan), onStatus: (s: string) => statuses.push(s) }));
     expect(t.status).toBe("done");
     expect(driver.maxInFlight).toBe(2);
-    expect([...driver.hands].sort()).toEqual(["Red-7", "Violet-1"]);
+    expect([...driver.hands].sort()).toEqual(["Purple-1", "Red-7"]);
     expect(driver.doc).toBe("eggs");
     expect(driver.docs.Spotify).toBe("drake");
     expect(statuses).toContain('part 1 (Notepad): ✓ Wrote "eggs" in Untitled - Notepad.');
@@ -300,14 +299,14 @@ describe("tasks at the same time", () => {
     const app = new App(driver, claudeFor(i => plans[i]), jev);
     const progress: string[] = [];
     const seen = new Set<number>();
-    app["emit"] = (e: any) => { if (e.type === "state") { seen.add(e.state.running.length); for (const p of Object.values(e.state.progress) as string[]) progress.push(p); } };
+    app["emit"] = (e: any) => { if (e.type === "state") { seen.add(e.state.running.length); for (const a of e.state.agents) progress.push(a.now); } };
     for (const name of ["web", "notes", "web2", "web3"]) app.add(name, "typed");
     for (let i = 0; i < 400 && app.busy; i++) await Bun.sleep(10);
     expect(app.tasks.map(t => [t.instruction, t.status])).toEqual([["web", "done"], ["notes", "done"], ["web2", "done"], ["web3", "done"]]);
     expect(seen.has(4)).toBe(true);
     expect(progress).toContain(`waiting for a browser window (in use by "web")`);
     expect(driver.maxInFlight).toBe(3);
-    expect([...driver.hands].sort()).toEqual(["Gold-5", "Mint-3", "Red-7"]);
+    expect([...driver.hands].sort()).toEqual(["Cyan-5", "Mint-3", "Red-7"]);
   });
 
   test("stopping one task leaves the others running", async () => {
@@ -361,11 +360,18 @@ describe("folders", () => {
   });
 });
 
-test("the overlay reports a click on the bubble (Windows line endings, lines split across reads)", async () => {
-  let closed = 0;
-  onBubbleClosed(() => closed++);
+test("the overlay's events reach the server (Windows line endings, lines split across reads, junk ignored)", async () => {
+  const got: OverlayEvent[] = [];
+  const off = onOverlay(e => got.push(e));
   const enc = new TextEncoder();
-  const chunks = ['{"event":"ready"}\r\nbubble-cl', "osed\r\n", "bubble-closed\r\n"];
+  const chunks = ['{"event":"ready"}\r\n{"event":"ask","te', 'xt":"what is this","cursor":{"x":5,"y":6}}\r\nnot json\r\n', '{"event":"step","go":"next"}\n'];
   await readEvents(new ReadableStream({ start(c) { for (const x of chunks) c.enqueue(enc.encode(x)); c.close(); } }));
-  expect(closed).toBe(2);
+  off();
+  expect(got).toEqual([{ event: "ready" }, { event: "ask", text: "what is this", cursor: { x: 5, y: 6 } }, { event: "step", go: "next" }]);
+});
+
+test("messages to the overlay are plain ASCII whatever the language; no overlay means no capture", async () => {
+  expect(asciiJson({ say: "Step 1 → 打開 “Save”" })).toBe('{"say":"Step 1 \\u2192 \\u6253\\u958b \\u201cSave\\u201d"}');
+  expect(JSON.parse(asciiJson({ say: "Step 1 → 打開 “Save”" })).say).toBe("Step 1 → 打開 “Save”");
+  expect(await captureScreen(200)).toBeUndefined();          // OVERLAY=off (and not Windows here)
 });

@@ -1,36 +1,80 @@
-// The on-screen overlay (Windows): marks around what the agent points at or was asked to circle, and an answer bubble
-// near the pointer, so the user never has to switch to the panel to read an answer. native/win/overlay.ps1 is one warm
-// process; marks are click-through, nothing ever takes focus (measured: 0 foreground changes). macOS: not built.
-// HIGHLIGHT=off turns marks off, BUBBLE=off the bubble.
+// The on-screen overlay (Windows): the buddy next to the cursor, the drawings, the agents' widgets, the pulses where they
+// act, the typing box, the voice, and the screen capture for explain mode. native/win/overlay.ps1 is one warm process
+// that speaks JSON lines both ways (the protocol is at the top of that file). It is the Windows twin of the Mac
+// version's Overlay.swift. OVERLAY=off turns it off (answers are then spoken with speak.ts).
 import type { Subprocess } from "bun";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 const SCRIPT = join(import.meta.dir, "..", "native", "win", "overlay.ps1");
 let proc: Subprocess<"pipe", "pipe", "ignore"> | null = null;
-const closedListeners = new Set<() => void>();
+let hello: object | undefined;
+let userQuit = false;                 // "Quit" in the tray menu: not restarted until the app restarts
+let lastStart = 0, quickExits = 0;    // an overlay that keeps dying right after starting is given up on
 
-/** Called when the user clicks the bubble away. */
-export function onBubbleClosed(f: () => void): void { closedListeners.add(f); }
+export type OverlayEvent =
+  | { event: "ready" }
+  | { event: "captured"; id: string; path?: string; imgW?: number; imgH?: number; x?: number; y?: number; w?: number; h?: number; cx?: number; cy?: number; error?: string }
+  | { event: "ask"; text: string; cursor?: { x: number; y: number } }
+  | { event: "step"; go: "next" | "back" }
+  | { event: "dismiss" }
+  | { event: "stop" }
+  | { event: "key"; what: string }
+  | { event: "quit" };
 
-export type Shape = "ring" | "box" | "arrow" | "underline";
-export interface Rect { x: number; y: number; w: number; h: number }
+/** a drawing on the screen, in physical screen pixels (the space of Cua's frames) */
+export interface Shape {
+  kind: "ring" | "box" | "circle" | "arrow" | "underline" | "label";
+  x?: number; y?: number; w?: number; h?: number;
+  from?: { x: number; y: number }; to?: { x: number; y: number };
+  text?: string;
+}
 
-const available = () => process.platform === "win32" && existsSync(SCRIPT);
+const listeners = new Set<(e: OverlayEvent) => void>();
+/** what the overlay sends: a typed question, lesson keys, Esc twice, the tray's Stop, a capture */
+export function onOverlay(f: (e: OverlayEvent) => void): () => void { listeners.add(f); return () => listeners.delete(f); }
 
-/** Starts the helper ahead of time (about 1 s to start), so the first mark or bubble is immediate. */
-export function warmOverlay(): void {
-  if (!available() || proc) return;
+export const overlayOn = (): boolean => process.platform === "win32" && process.env.OVERLAY !== "off" && existsSync(SCRIPT) && !userQuit && quickExits < 3;
+
+listeners.add(e => { if (e.event === "quit") userQuit = true; });
+
+/** starts the helper ahead of time (about 1 s to start), so the first answer is immediate */
+export function warmOverlay(greeting?: object): void {
+  if (greeting) hello = greeting;
+  if (!overlayOn() || proc) return;
+  // at most one start every 5 s, whatever is sent meanwhile (the agents' widgets update several times a second)
+  if (Date.now() - lastStart < 5000) return;
+  lastStart = Date.now();
   try {
     const p = Bun.spawn(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", SCRIPT],
       { stdin: "pipe", stdout: "pipe", stderr: "ignore" });
     proc = p;
-    p.exited.then(() => { if (proc === p) proc = null; });
+    const started = Date.now();
+    p.exited.then(code => {
+      if (proc === p) proc = null;
+      if (userQuit) return;
+      if (Date.now() - started < 15_000) {
+        quickExits++;
+        if (quickExits >= 3) console.log(`[overlay] the overlay keeps closing (exit ${code}): turned off until restart; answers are spoken with the Windows voice`);
+      } else quickExits = 0;
+    });
     void readEvents(p.stdout);
+    if (hello) send({ cmd: "hello", ...hello });
   } catch { proc = null; }
 }
 
-/** The helper's stdout: "bubble-closed" when the user clicks the bubble away (and its start-up line). */
+/** JSON with every non-ASCII character escaped: safe whatever code page the other side reads with */
+export const asciiJson = (m: object) => JSON.stringify(m).replace(/[\u007f-￿]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+
+/** one message to the overlay (starts it if needed); false when there is no overlay */
+export function send(m: { cmd: string; [k: string]: unknown }): boolean {
+  if (!overlayOn()) return false;
+  warmOverlay();
+  if (!proc) return false;
+  try { proc.stdin.write(asciiJson(m) + "\n"); proc.stdin.flush(); return true; } catch { return false; }
+}
+
+/** The overlay's stdout: one JSON event per line, to the listeners. Exported for tests. */
 export async function readEvents(out: ReadableStream<Uint8Array>) {
   const dec = new TextDecoder(), reader = out.getReader();
   let buf = "";
@@ -43,37 +87,38 @@ export async function readEvents(out: ReadableStream<Uint8Array>) {
       while ((i = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, i).trim();
         buf = buf.slice(i + 1);
-        if (line === "bubble-closed") for (const f of closedListeners) { try { f(); } catch { /* a listener never stops the overlay */ } }
+        let e: OverlayEvent;
+        try { e = JSON.parse(line); } catch { continue; }
+        for (const f of listeners) { try { f(e); } catch { /* a listener never stops the overlay */ } }
       }
     }
   } catch { /* the helper exited */ }
 }
 
-function send(msg: object): boolean {
-  if (!available()) return false;
-  warmOverlay();
-  if (!proc) return false;
-  try { proc.stdin.write(JSON.stringify(msg) + "\n"); proc.stdin.flush(); return true; } catch { return false; }
+export interface ScreenCapture {
+  path: string;                                   // the picture the model sees (PNG), in a temp folder
+  imgW: number; imgH: number;                     // its size in pixels
+  screen: { x: number; y: number; w: number; h: number };   // the screen it shows, in physical screen pixels
+  cursor?: { x: number; y: number };              // where the pointer was
 }
 
-/** Draws a shape around a rectangle (physical screen pixels) with an optional label, then fades it out. */
-export function drawMark(r: Rect, opts: { shape?: Shape; label?: string; color?: number; ms?: number } = {}): boolean {
-  if (process.env.HIGHLIGHT === "off") return false;
-  return send({ cmd: "mark", x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.w), h: Math.round(r.h),
-    shape: opts.shape ?? "ring", label: (opts.label ?? "").slice(0, 30), color: opts.color ?? 0, ms: opts.ms ?? 4000 });
+let nextId = 0;
+/** the screen under the cursor, right now (the overlay's own windows are never in it); undefined without an overlay */
+export function captureScreen(timeoutMs = 3000): Promise<ScreenCapture | undefined> {
+  const id = `c${++nextId}`;
+  return new Promise(resolve => {
+    let off = () => {};
+    const timer = setTimeout(() => { off(); resolve(undefined); }, timeoutMs);
+    off = onOverlay(e => {
+      if (e.event !== "captured" || e.id !== id) return;
+      clearTimeout(timer); off();
+      resolve(e.path && e.imgW && e.imgH && e.w && e.h ? {
+        path: e.path, imgW: e.imgW, imgH: e.imgH, screen: { x: e.x ?? 0, y: e.y ?? 0, w: e.w, h: e.h },
+        ...(typeof e.cx === "number" && typeof e.cy === "number" ? { cursor: { x: e.cx, y: e.cy } } : {}),
+      } : undefined);
+    });
+    if (!send({ cmd: "capture", id })) { clearTimeout(timer); off(); resolve(undefined); }
+  });
 }
-
-/** Compatibility: a plain ring. */
-export const highlight = (r: Rect, ms = 2500) => drawMark(r, { shape: "ring", ms });
-
-/** Shows (or updates) the answer bubble near a screen point, or bottom right when `at` is missing. */
-export function showBubble(text: string, opts: { at?: { x: number; y: number } | null; title?: string; ms?: number } = {}): boolean {
-  if (process.env.BUBBLE === "off" || !text.trim()) return false;
-  const ms = opts.ms ?? Math.min(25_000, 5000 + text.length * 55);   // long enough to read
-  return send({ cmd: "bubble", text: text.slice(0, 900), title: opts.title ?? "Agent", x: Math.round(opts.at?.x ?? -1), y: Math.round(opts.at?.y ?? -1), ms });
-}
-
-/** Hides the bubble. Never starts the helper just for that (nothing can be showing without it). */
-export function hideBubble(): void { if (proc) send({ cmd: "hide" }); }
 
 export function stopOverlay(): void { try { proc?.stdin.end(); } catch { /* gone */ } proc = null; }

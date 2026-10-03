@@ -1,8 +1,14 @@
 // Shared types. Platform-neutral: Windows and macOS drivers both implement `Driver`.
 
-// One Cua session per hand; the -N suffix fixes the cursor colour. Mint-3 and Gold-5: the agent's browser windows;
-// Red-7 and Violet-1: desktop apps; Blue-9: point-and-ask (see lanes.ts).
-export const HANDS = ["Mint-3", "Red-7", "Blue-9", "Gold-5", "Violet-1"] as const;
+// One Cua session per hand ("agent"). Cua colours a session's cursor by the -N suffix of its name (palette slot N), so
+// each name matches its colour. Mint-3 and Cyan-5: the agent's browser windows; Red-7 and Purple-1: desktop apps;
+// Blue-9: point-and-ask (see lanes.ts).
+export const HANDS = ["Mint-3", "Red-7", "Blue-9", "Cyan-5", "Purple-1"] as const;
+/** Cua's palette, the colour of each hand's cursor, its widget and its pulses (the same as the Mac version's). */
+export const AGENT_COLOURS: Record<string, string> = {
+  "Purple-1": "#a259ff", "Pink-2": "#ff5fa2", "Mint-3": "#2bb39a", "Amber-4": "#f5a623", "Cyan-5": "#22c3e6",
+  "Magenta-6": "#d63bd6", "Red-7": "#ff4d4f", "Lime-8": "#8fd400", "Blue-9": "#3b82f6",
+};
 export type HandName = (typeof HANDS)[number];
 
 /** Our role names. Each driver maps its platform's control types onto these (src/driver/roles.ts). */
@@ -93,7 +99,13 @@ export interface Driver {
   followActiveTab?(hand: HandName, w: WindowRef): Promise<WindowRef>;
   keepAlive?(hand: HandName): Promise<void>;
   endAll(): Promise<void>;
+  /** every press or text insert in an app, where it happened (the overlay flashes it in the hand's colour) */
+  onAction?: (n: ActionNote) => void;
+  /** the fast lane (UI Automation directly): on or off, and how many actions went which way */
+  fastLane?(): { on: boolean; reason: string; fast: number; cua: number; fellBack: number };
 }
+
+export interface ActionNote { hand: HandName; frame: { x: number; y: number; w: number; h: number }; kind: "press" | "type"; via: "fast" | "cua" }
 
 // ---------- perception + decisions ----------
 export interface Item {
@@ -146,6 +158,19 @@ export interface Task {
 }
 
 export interface ApprovalRequest { id: string; taskId: string; action: string; why: string }
+
+/**
+ * One part of a task as an "agent" (the Mac version's word): the hand that does it, in its colour, its app, what it is
+ * doing now and how it ended. The panel's agent cards and the overlay's widgets show these.
+ */
+export interface AgentState {
+  id: string; taskId: string; sub: number;
+  hand?: string; name: string; colour: string;   // name: the hand without its number ("Mint"); parts without a window get a colour too
+  app: string; goal: string;
+  status: "queued" | "running" | "done" | "failed";
+  now: string; answer?: string; reason?: string;
+  steps: number; seconds: number; startedAt?: number;
+}
 export type Approver = (r: ApprovalRequest) => Promise<boolean>;
 
 // ---------- JSONL: runs/<runId>/steps.jsonl ----------
@@ -160,7 +185,8 @@ export type LogLine =
   | { type: "files"; runId: string; t: string; taskId: string; sub: number; op: FileOp; actions: FileAction[]; results: { ok: boolean; detail: string }[] }
   | { type: "task_end"; runId: string; t: string; task: Task }
   | { type: "ask"; runId: string; t: string; taskId: string; question: string; window?: string; element?: string; answer: string; by: "claude" | "jev" | "code"; pointedAt?: string; ms: number }
-  | { type: "notice"; runId: string; t: string; level: "info" | "warn" | "error"; text: string };
+  | { type: "notice"; runId: string; t: string; level: "info" | "warn" | "error"; text: string }
+  | { type: "agent"; runId: string; t: string; taskId: string; agent: AgentState };
 
 export interface Logger { runId: string; write(l: LogLine): void }
 

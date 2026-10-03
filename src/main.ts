@@ -1,11 +1,11 @@
 // bun start: the agent + live panel (+ push-to-talk dictation). Windows today; macOS driver included, untested.
 import { Claude, CLAUDE_MODEL } from "./claude";
 import { makeDriver } from "./driver";
-import { startVoice } from "./intake";
+import { keyLabel, startVoice } from "./intake";
 import { Jev, JEV_MODEL } from "./jev";
 import { App } from "./server";
 import { BROWSER_HANDS } from "./lanes";
-import { stopOverlay, warmOverlay } from "./overlay";
+import { onOverlay, overlayOn, stopOverlay, warmOverlay } from "./overlay";
 
 const PANEL_PORT = Number(process.env.PANEL_PORT ?? 3000);
 const driver = makeDriver();
@@ -26,9 +26,12 @@ if (process.env.OPEN_PANEL === "1") {
 console.log(`driver: ${driver.caps.name}`);
 console.log(`deciders: ${jev ? `TypeSafe ${JEV_MODEL} first` : "no jev"}${claude ? `, Claude ${CLAUDE_MODEL} as fallback` : ", no Claude (jev + rules only)"}`);
 
+// The overlay (buddy, drawings, agents' widgets, typing box, voice) takes ~1 s to start: start it now.
+onOverlay(e => app.onOverlay(e));
+warmOverlay({ key: keyLabel(process.env.PTT_KEY ?? "ctrl_win") });
 const voice = startVoice(e => app.onVoice(e));
-warmOverlay();                                    // the overlay helper takes ~1 s to start
 app.voiceInfo = voice?.description ?? "voice off (type instead)";
+console.log(`overlay: ${overlayOn() ? "on" : "off"} · answers spoken with ${app.explainer.voice.name}`);
 app.pushState();
 
 if (driver.caps.platform !== "sim") {

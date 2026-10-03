@@ -3,7 +3,9 @@
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { Check, FileMatch, FileOp, Plan, Subtask } from "./contracts";
+import { nameTokens } from "./files";
 import type { Classification, FileOpKind, JevExtra, TaskType } from "./jev";
+import { isScreenQuestion } from "./pointer";
 
 export class PlanError extends Error {}
 
@@ -225,7 +227,29 @@ export function match(part: string): FileMatch {
   return { exts: exts.size ? [...exts] : undefined, name: named ? (named[1] ?? named[2]) : undefined };
 }
 
+/** "where is my Year 1 folder?", "find my essay in Documents", "open my tax return": looking a file or folder up by name. */
+export function looksLikeFind(part: string): boolean {
+  return /^(?:please\s+|can you\s+|could you\s+)*(?:tell me\s+)?(?:where(?:'s|\s+is|\s+are|\s+did i (?:put|save))\s+(?:my|the)\b|(?:find|locate|open)\s+my\b)/i.test(part.trim())
+    && /\b(folder|directory|file|document|essay|report|pdf|photo|picture|spreadsheet|presentation|notes|assignment|homework)s?\b|\.[a-z0-9]{2,4}\b/i.test(part)
+    && !/\b(menu|button|tab|icon|toolbar|option|setting)s?\b/i.test(part);          // "where is the file menu" is about the screen
+}
+
+/** A read-only search by name: the whole user folder, or the known folder named after "in" ("in Documents"). */
+export function findOp(part: string, home = homedir()): FileOp {
+  let name = part.trim().replace(/[?.!]+$/, "")
+    .replace(/^(?:please\s+|can you\s+|could you\s+)*(?:tell me\s+)?(?:where(?:'s|\s+is|\s+are|\s+did i (?:put|save))|find(?: me)?|locate|look for|search for|open|show(?: me)?)\s+/i, "")
+    .replace(/\s+(?:on|in) (?:my |this )?(?:computer|pc|laptop)$/i, "").trim();
+  const inFolder = name.match(/\s+(?:in|on|inside|under)\s+(?:my\s+|the\s+)?((?:desktop|downloads?|documents|pictures|photos|music|videos)(?:[\\/][\w.-]+)*)(?:\s+folder)?$/i);
+  if (inFolder) name = name.slice(0, inFolder.index).trim();
+  if (!nameTokens(name).some(t => !/^(my|the|a|an|folder|folders|file|files|called|named|document|directory)$/.test(t))) {
+    throw new PlanError("Which file or folder should I look for? Say its name, for example 'where is my Year 1 folder'.");
+  }
+  const want = /\b(folder|directory)\b/i.test(name) ? "folder" as const : /\.\w{2,4}\b|\b(file|document|pdf|photo|picture|spreadsheet|essay)\b/i.test(name) ? "file" as const : "any" as const;
+  return { op: "find", folder: inFolder ? resolveFolder(inFolder[1], home) : home, name, want, open: /^(?:please\s+)?(?:open|show)\b/i.test(part.trim()) };
+}
+
 export function fileOp(kind: FileOpKind, part: string, home = homedir()): FileOp {
+  if (kind === "find") return findOp(part, home);
   const fs = folders(part, home).filter(f => !f.startsWith("@sub:"));
   const sub = folders(part, home).find(f => f.startsWith("@sub:"))?.slice(5);
   const m = match(part);
@@ -281,6 +305,9 @@ export async function planWithJev(instruction: string, jev: JevExtra, apps: stri
     // A recognisable arithmetic expression is a calculation whatever the classifier said about the wording.
     const calc = calculation(part);
     if (type !== "calculate" && calc && /\b(calculat|comput|work out|what is|what's|calculator)/i.test(part)) type = "calculate";
+    // "Where is my Year 1 folder?" is searched on disk in code (fuzzy names: one = 1), never in File Explorer.
+    const find = looksLikeFind(part);
+    if (find) type = "files";
     // Text to compose (a note, a poem) is Claude's job; without Claude, ask for the exact words.
     if (type === "write_text" && needsComposing(part)) {
       if (o.defer?.length) return done({ by: "jev+rules", subtasks: [], question: "" }, true);
@@ -290,7 +317,9 @@ export async function planWithJev(instruction: string, jev: JevExtra, apps: stri
     // Without Claude: a general question is looked up on the web; a "what is this" needs the pointer.
     if (type === "chat") type = "web_question";
     if (type === "screen_question") {
-      return done({ by: "jev+rules", subtasks: [], question: "To ask about something on the screen, point at it with the mouse, hold Ctrl and ask out loud (or type the question and press 'Point & ask' on the panel)." });
+      // Answered from the window itself (point-and-ask). Only when sure: a task misread as a screen question would not run.
+      if (parts.length === 1 && (c.typeConf >= 0.6 || isScreenQuestion(part))) return done({ by: "jev+rules", subtasks: [], question: "", aboutScreen: true });
+      return done({ by: "jev+rules", subtasks: [], question: "To ask about something on the screen, point at it with the mouse, hold the talk keys and ask out loud (or type the question and press 'Point & ask' on the panel)." });
     }
     // Everyday requests with a direct results page (flights, directions, weather), however they were classified.
     let ready: Subtask | null = null;
@@ -301,7 +330,7 @@ export async function planWithJev(instruction: string, jev: JevExtra, apps: stri
       return done({ by: "jev+rules", subtasks: [], question: `I am not sure what to do with "${part}". Could you say it more specifically (which website, app, file or folder)?` });
     }
     try {
-      const sub = partPlan(type, part, c, apps, home, subtasks.length > 0 || !!o.previousAnswer);
+      const sub = partPlan(type, part, find ? { ...c, fileOp: "find" } : c, apps, home, subtasks.length > 0 || !!o.previousAnswer);
       if (sub.usePreviousAnswer && !subtasks.length && o.previousAnswer) {
         // "write that in Notepad" right after another task: the text is that task's answer.
         sub.values = sub.values.map(v => ({ ...v, text: v.text.replace("{previous answer}", o.previousAnswer!) }));
@@ -369,7 +398,7 @@ function partPlan(type: TaskType, part: string, c: Classification, apps: string[
       for (const p of [("folder" in op ? op.folder : op.path), "dest" in op ? op.dest : undefined].filter(Boolean) as string[]) {
         if (!pathOk(p, home)) throw new PlanError(`For safety I only work inside your user folder (${home}); "${p}" is outside it.`);
       }
-      return { surface: { kind: "files", op }, goal: part, values: [], question: op.op === "list" };
+      return { surface: { kind: "files", op }, goal: part, values: [], question: op.op === "list" || op.op === "find" };
     }
     default:
       throw new PlanError(`I am not sure what to do with "${part}".`);

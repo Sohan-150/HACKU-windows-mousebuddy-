@@ -21,6 +21,8 @@ export interface AgentDeps {
   driver: Driver; claude: ClaudeLike | null; jev: JevLike | null; log: Logger; approve: Approver; signal: AbortSignal;
   hand?: HandName; maxSteps?: number; onStatus?: (s: string) => void;
   conversation?: Turn[];                  // earlier tasks this session, for follow-ups ("book the cheapest one")
+  /** Answers a question about the user's screen (point-and-ask), for plans that turn out to be one. */
+  askScreen?: (question: string) => Promise<{ answer: string; evidence: string; jevUsd?: number; by?: "claude" | "jev" | "code" }>;
 }
 
 class TaskError extends Error { constructor(public code: ExceptionCode, reason: string) { super(reason); } }
@@ -62,6 +64,18 @@ export async function runTask(input: Task, deps0: AgentDeps): Promise<Task> {
     if (plan.question) throw new TaskError("needs_info", plan.question);
 
     task.status = "running";
+    if (plan.aboutScreen) {
+      // "What am I looking at?", "circle the zebra": answered from the user's window, never by a guess without it.
+      if (!deps.askScreen) throw new TaskError("needs_info", "To ask about something on the screen, point at it with the mouse, hold the talk keys and ask out loud (or type the question and press 'Point & ask' on the panel).");
+      deps.onStatus?.("looking at your screen");
+      const r = await deps.askScreen(task.instruction).catch(e => { throw new TaskError("driver_refused", `could not look at the screen: ${(e as Error).message}`); });
+      task.cost.jevUsd += r.jevUsd ?? 0;
+      if (r.by === "claude") task.counts.claude++; else if (r.by === "jev") task.counts.jev++;
+      task.result = { answer: r.answer, evidence: r.evidence };
+      task.status = "done";
+      deps.onStatus?.("idle");
+      return finish(task);
+    }
     const notes: string[] = [];
     let last = { answer: "", evidence: "" };
     for (let k = 0; k < plan.subtasks.length; k++) {
@@ -437,8 +451,12 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
       task.counts.falseDoneCaught++;
       falseDone++;
       history.push(`said done, but the ${by} check disagreed (${v.evidence.slice(0, 120)})`);
-      if (falseDone >= 2) throw new TaskError("false_done", `the goal looked done twice but the ${by} check disagrees: ${v.evidence}`);
+      // A check in code costs nothing and a page or player that is still loading often fails it once (YouTube between
+      // the results and the player): one more try, after a short wait. A model check gets two.
+      const strikes = by === "code" ? 3 : 2;
+      if (falseDone >= strikes) throw new TaskError("false_done", `the goal looked done ${falseDone} times but the ${by} check disagrees: ${v.evidence}`);
       tried.push("done"); actedLast = false;
+      if (by === "code") await Bun.sleep(1000);
       continue;
     }
     if (dec.kind === "stuck") {
@@ -587,8 +605,11 @@ const REJECT = /^(reject all|reject( all)? cookies|decline( all)?|refuse all|onl
 export function mediaQuery(sub: Subtask): string {
   if (sub.values[0]?.text) return sub.values[0].text;
   const s = sub.surface;
-  const raw = s.kind === "app" ? s.uri?.replace(/^spotify:search:/i, "") : s.kind === "browser" ? new URL(s.url).searchParams.get("search_query") ?? new URL(s.url).searchParams.get("q") : "";
-  try { return decodeURIComponent(raw ?? "").replace(/\+/g, " "); } catch { return raw ?? ""; }
+  let raw: string | null | undefined = "";
+  try {
+    raw = s.kind === "app" ? s.uri?.replace(/^spotify:search:/i, "") : s.kind === "browser" ? new URL(s.url).searchParams.get("search_query") ?? new URL(s.url).searchParams.get("q") : "";
+    return decodeURIComponent(raw ?? "").replace(/\+/g, " ");
+  } catch { return raw ?? ""; }
 }
 
 /** Words match when equal, one starts the other, or one letter differs ("weekend" ~ "Weeknd"): speech gets spellings wrong. */

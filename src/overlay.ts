@@ -48,6 +48,7 @@ export function showBubble(text: string, opts: { at?: { x: number; y: number } |
   return send({ cmd: "bubble", text: text.slice(0, 900), title: opts.title ?? "Agent", x: Math.round(opts.at?.x ?? -1), y: Math.round(opts.at?.y ?? -1), ms });
 }
 
-export function hideBubble(): void { send({ cmd: "hide" }); }
+/** Hides the bubble. Never starts the helper just for that (nothing can be showing without it). */
+export function hideBubble(): void { if (proc) send({ cmd: "hide" }); }
 
 export function stopOverlay(): void { try { proc?.stdin.end(); } catch { /* gone */ } proc = null; }

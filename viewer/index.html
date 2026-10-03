@@ -91,7 +91,7 @@
       <form id="form">
         <textarea id="text" placeholder="e.g. Find out when the University of Hong Kong was founded" aria-label="Instruction"></textarea>
         <div class="row spread" style="margin-top:8px">
-          <span class="hint" id="voicehint" style="margin:0">Type, or hold Ctrl and talk. Point the mouse at anything and ask "what is this?" or "where is save?".</span>
+          <span class="hint" id="voicehint" style="margin:0">Type, or hold the talk keys (Ctrl+Win) and talk. Point the mouse at anything and ask "what is this?", "where is save?" or "circle the zebra". Typed questions about the screen ("what am I looking at?") use the window you were in.</span>
           <span class="row"><button type="button" id="pointask" title="Type a question, press this, then point at something within 3 seconds">Point &amp; ask</button><button class="primary" type="submit">Run</button></span>
         </div>
       </form>
@@ -135,6 +135,8 @@ function renderState(s) {
   $("claude").className = "badge " + (s.deciders.claude ? "on" : "off");
   $("driver").textContent = s.driver;
   if (!$("vdot").classList.contains("live") && !$("vdot").classList.contains("busy")) $("vtext").textContent = s.voice;
+  const key = /^hold (.+?) and talk/.exec(s.voice)?.[1];
+  if (key) $("voicehint").textContent = `Type, or hold ${key} and talk. Point the mouse at anything and ask "what is this?", "where is save?" or "circle the zebra". Typed questions about the screen ("what am I looking at?") use the window you were in.`;
   $("notices").replaceChildren(...s.notices.map(n => el("div", { className: `notice ${n.level}`, textContent: n.text })));
   if (s.draft && s.draft !== lastDraft) { $("text").value = s.draft; $("text").focus(); }
   lastDraft = s.draft;
@@ -180,6 +182,7 @@ function onLog(l) {
   if (l.type === "task_start") feedLine(txt(`▶ ${l.task.instruction}  (deciders: ${l.deciders.join(" + ") || "none"})`), "dim");
   else if (l.type === "plan") {
     if (l.plan.question) feedLine(txt(`plan: needs more information: ${l.plan.question}`), "warn");
+    else if (l.plan.aboutScreen) feedLine(txt(`plan (${l.plan.by}): a question about your screen → answered from the window`), "dim");
     else l.plan.subtasks.forEach((s, i) => feedLine(txt(`plan ${i + 1} (${l.plan.by}): ${where(s.surface)} → ${s.goal}${s.values.length ? `  [texts: ${s.values.map(v => v.name).join(", ")}]` : ""}${s.check ? "  [checked in code]" : ""}`), "dim"));
   } else if (l.type === "step") {
     const d = l.decision, it = d.item !== undefined ? l.items[d.item] : null;

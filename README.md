@@ -1,6 +1,6 @@
 # Background Agent
 
-A desktop assistant that does what you ask, behind your windows. Type an instruction, or **hold Ctrl and say it**. It
+A desktop assistant that does what you ask, behind your windows. Type an instruction, or **hold Ctrl+Win and say it**. It
 works in its own browser window (a throwaway profile), in desktop apps through the accessibility interface, or directly
 on files in your user folder. **Point the mouse at something and ask** "what is this?" or "where is the save button?" and,
 like [Clicky](https://clicky.foo), it answers out loud, glides its own coloured cursor to the control and circles it.
@@ -30,6 +30,7 @@ Measured runs are in [evidence/live-jev-only.md](evidence/live-jev-only.md). Win
 | "Organise my Downloads", "convert the PNGs on my Desktop to jpg", "how many PDFs in Documents" | files on disk: preview, approval, check, **Undo** |
 | "Find the weather in Tokyo then write it in Notepad" | multi-step: up to 5 parts, each checked |
 | Point + "what is this?" / "where is settings?" / "read this" | answered from the window under the pointer; the control is circled |
+| "Where is my Year 1 folder?", "open my tax return" | searched on disk by name ("one" = "1", case and spaces ignored); shown in File Explorer |
 
 With a Claude key it also composes text ("write a thank-you note"), takes on open-ended web tasks (search, compare,
 go as far as the page before payment: tested with a real flight to Taipei), explains what you point at from a
@@ -43,8 +44,8 @@ that are not in the accessibility list. Tested live with Sonnet 5.5 and Haiku 4.
 - Never types into password, card or ID fields; never completes a purchase or booking.
 - Files: only inside your user folder, never deleted, never overwritten (`a (1).txt`), every move undoable.
 - Existing text in an app is never replaced silently: it opens a new tab, or asks.
-- Point-and-ask is read-only. Its cursor is the agent's overlay and the ring is click-through and never takes focus
-  (0 foreground changes measured); your mouse is never moved.
+- Point-and-ask is read-only. Its cursor is the agent's overlay; the marks are click-through, and neither they nor the
+  bubble ever take focus (0 foreground changes measured); your mouse is never moved.
 - Say "stop" (or press Stop) to abort at the next step.
 
 ## Quick start: Windows
@@ -81,13 +82,19 @@ voice helpers as in [native/mac/README.md](native/mac/README.md) (Right-Option);
 ## Using it
 
 - **Type** an instruction and press Enter, or click an example.
-- **Hold Ctrl and talk** (either Ctrl key). The agent's cursor glides next to your pointer while it listens. Shortcuts,
-  clicks and Ctrl+scroll cancel the recording, so normal Ctrl use is safe. Release to run it. Answers are spoken
+- **Hold Ctrl+Win and talk** (`PTT_KEY` changes it: `ctrl_alt`, `ctrl_shift`, `right_ctrl`, `f8`...; the Fn key never
+  reaches Windows, so it cannot be used). The agent's cursor glides next to your pointer while it listens. Another key
+  (a shortcut such as Ctrl+Win+D), a click or a scroll cancels the recording. Release to run it. Answers are spoken
   (`SPEAK=off` to silence). `VOICE_MODE=draft` puts what you said in the box instead of running it.
-- **Point and ask**: hold Ctrl, point at something, ask "what is this?", "what does this button do?", "where is print?",
-  "read this" (with Claude also "how do I make a pivot table?"). The answer is spoken; the control is circled with a
-  ring that fades after 2.5 s (`HIGHLIGHT=off` to turn it off). Without a microphone: type the question, press **Point & ask**, and point within 3 seconds.
-- **Approvals** appear at the top of the panel; with voice, hold Ctrl and say "yes" or "no".
+- **Answers on the screen**: a small bubble shows "Listening…", "Thinking…", the answer (next to your pointer for
+  point-and-ask, bottom right otherwise), approvals and the result of every task, so you never have to switch to the
+  panel. Click it to close it; it never takes focus (`BUBBLE=off` to turn it off).
+- **Point and ask**: hold Ctrl+Win, point at something, ask "what is this?", "what does this button do?", "where is
+  print?", "read this" (with Claude also "how do I make a pivot table?", "circle the zebra and the hippo", "what am I
+  looking at?"). The answer is spoken; what it talks about is marked with rings, boxes, arrows or underlines, each with
+  its own colour and a label (`HIGHLIGHT=off` to turn them off). Typed in the panel, the same questions are about the
+  window you were using before the panel. Or type the question, press **Point & ask**, and point within 3 seconds.
+- **Approvals** appear at the top of the panel and in the bubble; with voice, hold Ctrl+Win and say "yes" or "no".
 - **Stop**, **Clear**, **Undo last file moves**, and **Replay a past run** (from `runs/<runId>/steps.jsonl`).
 
 ## How a task runs
@@ -107,13 +114,14 @@ voice helpers as in [native/mac/README.md](native/mac/README.md) (Right-Option);
 | `src/agent.ts` | the task loop: plan, steps, guardrails, checks |
 | `src/planner.ts` | jev + rules planning (search, flights, directions, weather, calculator, text, files) |
 | `src/jev.ts`, `src/claude.ts` | the two deciders |
-| `src/pointer.ts`, `src/ask.ts`, `src/highlight.ts`, `native/win/highlight.ps1` | point-and-ask: window and control under the pointer, the answer, pointing back, the ring |
+| `src/pointer.ts`, `src/ask.ts`, `src/overlay.ts`, `native/win/overlay.ps1` | point-and-ask: window and control under the pointer (or behind the panel), the answer, pointing back, the marks and the answer bubble |
 | `src/files.ts`, `src/safety.ts` | file operations (preview, run, check, undo); approval and secret-field rules |
 | `src/driver/win.ts`, `mac.ts`, `sim.ts` | Cua on Windows (browser route + UI Automation), macOS (untested), simulator for tests |
 | `src/server.ts`, `viewer/index.html` | panel, task queue, approvals, voice routing, conversation memory |
 | `src/intake/index.ts`, `native/win/voice.py`, `native/mac/*`, `src/speak.ts` | hold-to-talk, on-device speech, spoken answers |
 
-`bun test` runs 65 tests (simulated desktop, mocked deciders, real file conversions, a recorded voice clip).
+`bun test` runs the tests (simulated desktop, mocked deciders, real file conversions, a recorded voice clip). The
+image and PDF conversion tests need Windows (System.Drawing, Chrome or Edge).
 `bun scripts/smoke-win.ts` checks the real driver without models.
 
 ## What leaves the device

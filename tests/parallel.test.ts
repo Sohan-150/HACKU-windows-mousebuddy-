@@ -323,6 +323,11 @@ describe("tasks at the same time", () => {
 describe("planning", () => {
   test("new sentences, 'at the same time' and 'and also' split; lists stay whole", () => {
     expect(splitParts("Can you open my CCHU9053 folder? At the same time, open my coding folder and tell me what is inside.")).toEqual(["Can you open my CCHU9053 folder", "open my coding folder and tell me what is inside"]);
+    // another app or another job is another part; the same app stays one part
+    expect(splitParts("Compute 45 times 12 in Calculator, and in Notepad write a short note saying the team meeting moved to 5pm")).toEqual(["Compute 45 times 12 in Calculator", "in Notepad write a short note saying the team meeting moved to 5pm"]);
+    expect(splitParts("open Spotify and play Drake and open Discord")).toEqual(["open Spotify and play Drake", "open Discord"]);
+    expect(splitParts("Play Drake on Spotify, and send hi to Mohit on WhatsApp")).toEqual(["Play Drake on Spotify", "send hi to Mohit on WhatsApp"]);
+    expect(splitParts("Write eggs, milk and bread in Notepad")).toEqual(["Write eggs, milk and bread in Notepad"]);
     expect(splitParts("find flights to Botswana and then at the same time play Drake on Spotify")).toEqual(["find flights to Botswana", "play Drake on Spotify"]);
     expect(splitParts("check the weather and also open Notepad")).toEqual(["check the weather", "open Notepad"]);
     expect(splitParts("Write eggs, milk and bread in Notepad")).toEqual(["Write eggs, milk and bread in Notepad"]);

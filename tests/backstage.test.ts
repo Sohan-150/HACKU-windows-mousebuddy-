@@ -1,12 +1,15 @@
 // The parts ported from the Mac version (Backstage): the router (agents or explain), explain mode (lessons, drawing
 // placement, voice), ElevenLabs with its fallbacks, and how results are shown and said. No network, no Cua, no overlay.
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExplainAnswer, ExplainShape } from "../src/claude";
 import type { AgentState } from "../src/contracts";
 import { SimDriver } from "../src/driver/sim";
 import { Explainer, place, type Capture } from "../src/explain";
 import { FastLane } from "../src/fastlane";
+import { findShortcut } from "../src/driver/win";
 import type { ScreenControl } from "../src/pointer";
 import { sayable, spokenSummary, tidyAnswer } from "../src/results";
 import { route } from "../src/router";
@@ -32,6 +35,17 @@ describe("router: one hotkey, a job for the agents or a question about the scree
     }
   });
 
+  test("orders go to the agents, whatever words they contain (the requests from the first Windows run)", async () => {
+    for (const q of ["Mute my mic on Discord.", "Can you open discord and mute myself?", "Can you open VS Code?",
+      "Can you open Spotify and play Drake and then unmute myself on Discord and also send a message to my like most recent open chat on Discord saying hi, this is the background agent typing and then go to WhatsApp and message Mohit hi.",
+      "message Mohit hi on WhatsApp", "unmute me", "Discord, mute me please", "join the general voice channel"]) {
+      expect([q, await to(q)]).toEqual([q, "agents"]);
+    }
+    // unclear and not a question: done, not explained
+    expect(await to("my mic off please")).toBe("agents");
+    expect(await to("is my mic on?")).toBe("explain");
+  });
+
   test("'stop' stops only when agents are working; lesson words stay with the lesson", async () => {
     expect(await to("stop", { agentsBusy: true })).toBe("stop");
     expect(await to("Stop everything.", { agentsBusy: true })).toBe("stop");
@@ -39,13 +53,15 @@ describe("router: one hotkey, a job for the agents or a question about the scree
     for (const q of ["next", "go on", "repeat", "back", "ok"]) expect(await to(q, { lesson: true })).toBe("explain");
   });
 
-  test("unclear: jev decides, and only a confident 'agents' starts them (explaining never changes anything)", async () => {
+  test("unclear: jev decides; without a sure answer a question is explained and anything else is done", async () => {
     const jev = (choice: string, confidence: number) => ({ choose: async () => ({ choice, confidence, inputTokens: 50 }) });
-    const r = await route("the quarterly numbers", { ...ctx, jev: jev("agents", 0.8) });
-    expect([r.to, r.via, r.confidence]).toEqual(["agents", "jev", 0.8]);
-    expect(await to("the quarterly numbers", { jev: jev("agents", 0.5) })).toBe("explain");
-    expect(await to("the quarterly numbers", { jev: { choose: async () => { throw new Error("offline"); } } })).toBe("explain");
-    expect(await to("the quarterly numbers")).toBe("explain");   // no jev
+    const r = await route("the quarterly numbers", { ...ctx, jev: jev("explain", 0.8) });
+    expect([r.to, r.via, r.confidence]).toEqual(["explain", "jev", 0.8]);
+    expect(await to("the quarterly numbers", { jev: jev("agents", 0.7) })).toBe("agents");
+    expect(await to("the quarterly numbers", { jev: jev("explain", 0.3) })).toBe("agents");    // unsure: do it
+    expect(await to("the quarterly numbers?", { jev: jev("agents", 0.3) })).toBe("explain");  // unsure question: explain
+    expect(await to("the quarterly numbers", { jev: { choose: async () => { throw new Error("offline"); } } })).toBe("agents");
+    expect(await to("the quarterly numbers")).toBe("agents");   // no jev
   });
 });
 
@@ -268,6 +284,20 @@ describe("the server: the hotkey's words, the agents' widgets", () => {
     expect(o.sent.filter(m => m.cmd === "answer").at(-1).say).toBe("Stopping the agents.");
   });
 
+  test("explain mode hands a job it was given to the agents instead of saying it can only point", async () => {
+    const o = overlay();
+    const claude = {
+      ...fakeClaude({ task: true, steps: [] }),
+      plan: async () => ({ plan: { by: "claude" as const, question: "", subtasks: [{ surface: { kind: "answer" as const, reply: "Done that." }, goal: "answer", values: [] }] }, ms: 1 }),
+      decide: async () => { throw new Error("no steps"); }, write: async () => ({ text: "", ms: 0 }), url: async () => ({ url: "", ms: 0 }), verify: async () => ({ complete: true, answer: "", evidence: "", ms: 0 }),
+    };
+    const app = new App(desktop(), claude as any, null, "Mint-3", { send: o.send, voice: quietVoice(), capture: async () => cap() });
+    await app.hotkey("what about my mic on discord", "voice");      // unclear wording that reads like a question
+    await settle(app);
+    expect(app.tasks.map(t => [t.instruction, t.status])).toEqual([["what about my mic on discord", "done"]]);
+    expect(o.sent.filter(m => m.cmd === "answer").map(m => m.say)).toEqual(["On it.", "Done that."]);
+  });
+
   test("the talk keys: listening, a tap opens the typing box, a cancel throws the picture away", async () => {
     const o = overlay();
     let captures = 0;
@@ -312,6 +342,15 @@ describe("fast lane (UI Automation directly)", () => {
     expect(type).toMatchObject({ ok: false, error: "inside a web page: needs key events café" });
     expect((await lane.press({ ...seven, label: "Eight" })).error).toBe("element not found where the agent saw it");
     lane.stop();
+  });
+
+  test("an app whose packaged entry is broken is started from its shortcut", () => {
+    const dir = mkdtempSync(join(tmpdir(), "startmenu-"));
+    mkdirSync(join(dir, "Visual Studio Code"), { recursive: true });
+    for (const f of ["Visual Studio Code/Visual Studio Code.lnk", "Visual Studio Code/Uninstall Visual Studio Code.lnk", "Discord.lnk", "Discord Updater.lnk"]) writeFileSync(join(dir, f), "");
+    expect(findShortcut("Visual Studio Code", [dir])).toBe(join(dir, "Visual Studio Code", "Visual Studio Code.lnk"));
+    expect(findShortcut("Discord", [dir])).toBe(join(dir, "Discord.lnk"));
+    expect(findShortcut("Photoshop", [dir])).toBeUndefined();
   });
 
   test("off when the helper doesn't start, or with FAST_INPUT=off: nothing waits on it", async () => {

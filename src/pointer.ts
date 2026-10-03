@@ -150,13 +150,17 @@ const DRAW = /^(?:(?:please|can you|could you|would you|will you|now|also|and)\s
 // Drawing words that name a task in an app or on mail, not a mark on the screen.
 const DRAW_TASK = /\b(?:in|using|with) (?:paint|word|powerpoint|excel|photoshop|notepad)\b|\bas (?:read|unread|done|complete|spam)\b|\b(?:e-?mails?|inbox|messages?)\b/;
 
+// An order to do something ("can you open Spotify and send 'this is me'"): never a question about the screen, whatever
+// words like "this" it contains.
+const ORDER = /^((please|can you|could you|would you|will you) )*(open|launch|start|close|go to|search|look up|book|write|type|calculate|compute|convert|move|copy|organi[sz]e|find out|send|message|text|reply|email|call|play|pause|mute|unmute|join|click|press|install|download)\b/;
+
 /**
  * Any question about the screen: pointing ("what is this?"), looking ("what am I looking at?", "describe my screen"),
  * or drawing ("circle the zebra", "highlight the cheetah and the hippo").
  */
 export function isScreenQuestion(text: string): boolean {
   const t = text.toLowerCase().trim();
-  if (/^(open|go to|search|look up|book|type|calculate|convert|move|copy|organi[sz]e|find out|send|email|play)\b/.test(t)) return false;
+  if (ORDER.test(t)) return false;
   const draw = DRAW.test(t) && !DRAW_TASK.test(t);
   return isPointerQuestion(text) || LOOKING.test(t) || draw;
 }
@@ -164,7 +168,7 @@ export function isScreenQuestion(text: string): boolean {
 /** Is this utterance a question about what the user is pointing at (rather than a task to do)? */
 export function isPointerQuestion(text: string): boolean {
   const t = text.toLowerCase().trim();
-  if (/^(open|go to|search|look up|book|write|type|calculate|convert|move|copy|organi[sz]e|find out|send|email|play)\b/.test(t)) return false;
+  if (ORDER.test(t)) return false;
   const deictic = /\b(this|that|these|those|here|over there|under (my|the) (mouse|cursor|pointer)|i'?m pointing|pointing at)\b/.test(t);
   const asks = /\?$|^(what|what's|whats|why|how|who|where|which|is|are|does|do|can|could|explain|tell me|read|translate|summari[sz]e|describe)\b/.test(t);
   // "where is the save button" is about the screen; "where is Tokyo" / "how do I get to the airport" are not.

@@ -19,7 +19,7 @@
 # same space as Cua's window bounds and element frames. Exits when stdin closes.
 #   in:  hello {key} | capture {id} | listening | status {text} | idle | typebox | clear | error {text}
 #        answer {seq, say, shapes[], step?, fadeMs, audio: "follows"|"system"} | audio {seq, part, path} | speak {seq, part, say}
-#        agents {running, tasks[]} | tap {colour, x, y, w, h}
+#        agents {running, tasks[]} | tap {colour, x, y, w, h, pid}
 #   out: ready | captured {id, path, imgW, imgH, x, y, w, h, cx, cy} | ask {text, cursor} | step {go} | dismiss | stop | key {what} | quit
 $ErrorActionPreference = "Stop"
 Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Speech -TypeDefinition @"
@@ -57,6 +57,16 @@ public static class Native {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr pid);
+    [DllImport("user32.dll", EntryPoint = "GetWindowThreadProcessId")] public static extern uint WindowPid(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+    /** is a window of this process what the user sees at this point (not covered by another app's window)? */
+    public static bool ShowsProcess(int x, int y, int pid) {
+        var w = WindowFromPoint(new POINT(x, y));
+        if (w == IntPtr.Zero) return false;
+        uint owner; WindowPid(GetAncestor(w, 2), out owner);
+        return owner == (uint)pid;
+    }
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
@@ -782,6 +792,9 @@ public static class Overlay {
             if (cmd == "audio") voice.Add("mp3", J.S(m, "path")); else voice.Add("text", J.S(m, "say"));
         } else if (cmd == "agents") dock.Apply(m);
         else if (cmd == "tap") {
+            // only where the agent's app can be seen: an app working behind other windows gets no flash on top of them
+            int pid = J.I(m, "pid", 0);
+            if (pid > 0 && !Native.ShowsProcess((int)(J.F(m, "x") + J.F(m, "w") / 2), (int)(J.F(m, "y") + J.F(m, "h") / 2), pid)) return;
             var p = new Pulse(new Rectangle((int)J.F(m, "x"), (int)J.F(m, "y"), Math.Max(4, (int)J.F(m, "w")), Math.Max(4, (int)J.F(m, "h"))), Look.Hex(J.S(m, "colour"), Look.MINT));
             pulses.Add(p);
         } else if (cmd == "clear") Clear();

@@ -3,6 +3,7 @@
 # One warm process: reads JSON lines on stdin, in physical screen pixels (the same space as Cua's window bounds):
 #   {"cmd":"mark","shape":"ring","x":..,"y":..,"w":..,"h":..,"label":"zebra","color":0,"ms":6000}
 #   {"cmd":"bubble","text":"...","title":"Answer","x":..,"y":..,"ms":9000}      (x,y = pointer; -1 = bottom right)
+#   The user can drag the bubble anywhere; later bubbles then appear where they left it.
 #   {"cmd":"hide"}
 # Writes "bubble-closed" on stdout when the user clicks the bubble away. Exits when stdin closes.
 $ErrorActionPreference = "Stop"
@@ -31,6 +32,8 @@ public class OverlayForm : Form {
         StartPosition = FormStartPosition.Manual; DoubleBuffered = true;
         var t = new System.Windows.Forms.Timer { Interval = 40 };
         t.Tick += (s, e) => {
+            // The bubble stays while the mouse is on it (reading it, or about to drag it).
+            if (!clickThrough && Visible && Bounds.Contains(Cursor.Position)) { born = DateTime.Now; if (Opacity < 0.9) Opacity = 0.96; }
             var age = (DateTime.Now - born).TotalMilliseconds;
             if (age > life + fade) { t.Stop(); Close(); }
             else if (age > life) Opacity = Math.Max(0, 1 - (age - life) / fade);
@@ -93,28 +96,58 @@ public class Mark : OverlayForm {
 }
 
 public class Bubble : OverlayForm {
-    string title, text; Font titleFont = new Font("Segoe UI", 9f, FontStyle.Bold), textFont = new Font("Segoe UI", 11f);
+    string title, text; Font titleFont = new Font("Segoe UI", 9f, FontStyle.Bold), textFont = new Font("Segoe UI", 11f), hintFont = new Font("Segoe UI", 8f);
     const int W = 460, P = 14;
+    // Dragged somewhere by the user: later bubbles appear there too (until the helper restarts).
+    static bool placed; static Point placedAt;
+    bool down, moved; Point downCursor, downForm;
     public Bubble(int ms) : base(ms) { clickThrough = false; Text = "agent-bubble"; BackColor = Color.FromArgb(30, 34, 48); Opacity = 0.96; }
     public void Set(string title, string text, Point at, int ms) {
         this.title = title ?? "Agent"; this.text = text ?? ""; Renew(ms); Opacity = 0.96;
         var size = TextRenderer.MeasureText(this.text, textFont, new Size(W - 2 * P, 2000), TextFormatFlags.WordBreak);
         int h = Math.Min(P + 20 + size.Height + P, 520);
-        var screen = at.X < 0 ? Screen.PrimaryScreen.WorkingArea : Screen.FromPoint(at).WorkingArea;
-        int x = at.X < 0 ? screen.Right - W - 24 : at.X + 28, y = at.X < 0 ? screen.Bottom - h - 24 : at.Y + 28;
-        if (x + W > screen.Right) x = Math.Max(screen.Left, at.X - W - 28);
-        if (y + h > screen.Bottom) y = Math.Max(screen.Top, at.Y - h - 28);
+        int x, y;
+        if (down) { x = Left; y = Top; }                               // being dragged: only the text changes
+        else if (placed) {
+            var area = Screen.FromPoint(placedAt).WorkingArea;
+            x = Math.Max(area.Left, Math.Min(placedAt.X, area.Right - W));
+            y = Math.Max(area.Top, Math.Min(placedAt.Y, area.Bottom - h));
+        } else {
+            var screen = at.X < 0 ? Screen.PrimaryScreen.WorkingArea : Screen.FromPoint(at).WorkingArea;
+            x = at.X < 0 ? screen.Right - W - 24 : at.X + 28; y = at.X < 0 ? screen.Bottom - h - 24 : at.Y + 28;
+            if (x + W > screen.Right) x = Math.Max(screen.Left, at.X - W - 28);
+            if (y + h > screen.Bottom) y = Math.Max(screen.Top, at.Y - h - 28);
+        }
         Bounds = new Rectangle(x, y, W, h);
         Region = Region.FromHrgn(CreateRoundRectRgn(0, 0, W + 1, h + 1, 18, 18));
         Invalidate();
     }
     [DllImport("gdi32.dll")] static extern IntPtr CreateRoundRectRgn(int a, int b, int c, int d, int e, int f);
-    // Tells the agent the user closed it, so progress updates do not bring it straight back.
-    protected override void OnClick(EventArgs e) { try { Console.Out.WriteLine("bubble-closed"); Console.Out.Flush(); } catch { } Close(); }
+    // Drag it anywhere (it stays there for the next bubbles); a click without dragging closes it and tells the agent,
+    // so progress updates do not bring it straight back.
+    protected override void OnMouseDown(MouseEventArgs e) {
+        if (e.Button != MouseButtons.Left) return;
+        down = true; moved = false; downCursor = Cursor.Position; downForm = Location; Capture = true;
+        Renew(Math.Max(life, 8000));
+    }
+    protected override void OnMouseMove(MouseEventArgs e) {
+        if (!down) return;
+        var p = Cursor.Position; int dx = p.X - downCursor.X, dy = p.Y - downCursor.Y;
+        if (!moved && Math.Abs(dx) + Math.Abs(dy) < 5) return;
+        moved = true; Location = new Point(downForm.X + dx, downForm.Y + dy);
+    }
+    protected override void OnMouseUp(MouseEventArgs e) {
+        if (!down) return;
+        down = false; Capture = false;
+        if (moved) { placed = true; placedAt = Location; return; }
+        try { Console.Out.WriteLine("bubble-closed"); Console.Out.Flush(); } catch { }
+        Close();
+    }
     protected override void OnPaint(PaintEventArgs e) {
         var g = e.Graphics;
         using (var accent = new SolidBrush(Palette.Of(0))) g.FillRectangle(accent, 0, 0, 5, Height);
         TextRenderer.DrawText(g, title, titleFont, new Rectangle(P, P - 4, W - 2 * P, 20), Color.FromArgb(150, 190, 255), TextFormatFlags.Left);
+        TextRenderer.DrawText(g, "drag to move, click to close", hintFont, new Rectangle(P, P - 3, W - 2 * P, 20), Color.FromArgb(110, 120, 140), TextFormatFlags.Right);
         TextRenderer.DrawText(g, text, textFont, new Rectangle(P, P + 18, W - 2 * P, Height - P - 18), Color.White, TextFormatFlags.WordBreak);
     }
 }

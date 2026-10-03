@@ -72,6 +72,19 @@ class SlowSim extends SimDriver {
 const deps = (over: Record<string, unknown>) => ({ log: new MemoryLogger(), signal: new AbortController().signal, approve: async () => true, ...over }) as any;
 
 describe("locks", () => {
+  test("the first free of several (two browser windows), and the next one in line gets the one let go", async () => {
+    const locks = new Locks(), signal = new AbortController().signal;
+    const a = await locks.acquireAny(["hand:Mint-3", "hand:Gold-5"], "A", signal);
+    const b = await locks.acquireAny(["hand:Mint-3", "hand:Gold-5"], "B", signal);
+    expect([a.name, b.name]).toEqual(["hand:Mint-3", "hand:Gold-5"]);
+    let waitedFor = "";
+    const c = locks.acquireAny(["hand:Mint-3", "hand:Gold-5"], "C", signal, h => (waitedFor = h));
+    expect(waitedFor).toBe("A");
+    b.release();
+    expect((await c).name).toBe("hand:Gold-5");
+    expect(locks.holder("hand:Gold-5")).toBe("C");
+  });
+
   test("one holder at a time, in the order asked, handed straight to the next", async () => {
     const locks = new Locks(), order: string[] = [], waited: string[] = [];
     const signal = new AbortController().signal;
@@ -151,6 +164,33 @@ describe("parts of one task", () => {
   });
 });
 
+describe("several desktop apps", () => {
+  const spotifyPart: Subtask = { surface: { kind: "app", app: "Spotify" }, goal: "Drake is playing.", values: [{ name: "text", text: "drake" }], check: { kind: "field_equals", role: "text area", expected: "drake" } };
+
+  test("two apps at the same time, each with its own hand; each part's progress line says how it ended", async () => {
+    const driver = new SlowSim(), statuses: string[] = [];
+    const plan: Plan = { by: "claude", question: "", subtasks: [notepadPart(), spotifyPart] };
+    const t = await runTask(newTask("launch Fortnite at the same time play Drake on Spotify", "typed"), deps({ driver, jev, claude: claudeFor(() => plan), onStatus: (s: string) => statuses.push(s) }));
+    expect(t.status).toBe("done");
+    expect(driver.maxInFlight).toBe(2);
+    expect([...driver.hands].sort()).toEqual(["Red-7", "Violet-1"]);
+    expect(driver.doc).toBe("eggs");
+    expect(driver.docs.Spotify).toBe("drake");
+    expect(statuses).toContain('part 1 (Notepad): ✓ Wrote "eggs" in Untitled - Notepad.');
+    expect(statuses).toContain('part 2 (Spotify): ✓ Wrote "drake" in Untitled - Spotify.');
+    expect(statuses.some(s => s.startsWith("part 2 (Spotify): opening the app Spotify"))).toBe(true);
+  });
+
+  test("two parts in the same app take turns", async () => {
+    const driver = new SlowSim(), statuses: string[] = [];
+    const plan: Plan = { by: "claude", question: "", subtasks: [notepadPart("one"), notepadPart("two")] };
+    const t = await runTask(newTask("write one in Notepad and also write two in Notepad", "typed"), deps({ driver, jev, claude: claudeFor(() => plan), onStatus: (s: string) => statuses.push(s) }));
+    expect(t.status).toBe("done");
+    expect(driver.maxInFlight).toBe(1);
+    expect(statuses).toContain('part 2 (Notepad): waiting for notepad (in use by "write one in Notepad and also write two in Notepad")');
+  });
+});
+
 describe("desktop apps", () => {
   /** The sim's app window, as an app that is updating something. */
   class Updating extends SimDriver {
@@ -212,24 +252,62 @@ describe("desktop apps", () => {
   });
 });
 
+describe("loading and unreadable windows", () => {
+  test("a player page still filling in is waited for without asking a model", async () => {
+    let looks = 0, asked = 0;
+    // YouTube: the header first, the results a moment later.
+    class Filling extends SimDriver {
+      async observe(hand: HandName, w: WindowRef) {
+        const o = await super.observe(hand, w);
+        return ++looks <= 3 ? { ...o, elements: o.elements.slice(0, 1), text: ["Skip navigation"] } : o;
+      }
+    }
+    const plan: Plan = { by: "claude", question: "", subtasks: [{ ...webPart, check: { kind: "playing" } }] };
+    const counting: JevLike = { async decide(s) { asked++; return jev.decide(s); } };
+    await runTask(newTask("play a video about HKU", "typed"), deps({ driver: new Filling(), jev: counting, claude: claudeFor(() => plan), maxSteps: 2 }));
+    expect(looks).toBeGreaterThan(3);
+    expect(asked).toBeLessThanOrEqual(2);                        // only once the page had filled in
+  });
+
+  test("an app that shows nothing to accessibility tools is reported instead of waited on", async () => {
+    class Blind extends SimDriver {
+      async observe(hand: HandName, w: WindowRef) { const o = await super.observe(hand, w); return w.kind === "app" ? { ...o, title: "Epic Games Launcher", elements: [], text: [] } : o; }
+    }
+    const plan: Plan = { by: "claude", question: "", subtasks: [{ surface: { kind: "app", app: "Notepad", uri: "com.epicgames.launcher://apps/Fortnite?action=launch&silent=true" }, goal: "Fortnite is starting.", values: [] }] };
+    const t = await runTask(newTask("launch Fortnite", "typed"), deps({ driver: new Blind(), jev, claude: claudeFor(() => plan) }));
+    expect(t.exception).toEqual({ code: "needs_info", reason: "Epic Games Launcher doesn't show its buttons or text to accessibility tools, so I can't see or use it. I opened it with its own link (com.epicgames.launcher://apps/Fortnite?action=launch&silent=true), so it may already be doing what you asked." });
+  }, 15_000);
+
+  test("game launcher links are kept in plans; other links are not", async () => {
+    const part = (uri: string) => ({ surface: "app", url: "", app: "Epic Games Launcher", uri, goal: "Fortnite is starting", values: [], needs_previous: false, reply: "", doc_title: "", doc_text: "", file_op: "", folder: "", dest: "", exts: [], file_name: "", to_format: "" });
+    const reply = { question: "", about_screen: false, subtasks: [part("com.epicgames.launcher://apps/Fortnite?action=launch&silent=true"), part("steam://rungameid/730"), part("javascript:alert(1)")] };
+    const fetch = (async () => new Response(JSON.stringify({ id: "m", type: "message", role: "assistant", model: "claude-sonnet-5-5", stop_reason: "end_turn", stop_details: null,
+      content: [{ type: "text", text: JSON.stringify(reply) }], usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200, headers: { "content-type": "application/json" } })) as any;
+    const r = await new Claude({ apiKey: "k", fetch }).plan("launch Fortnite", { today: "2026-10-03", platform: "Windows", apps: ["Epic Games Launcher"] });
+    expect(r.plan.subtasks.map(s => (s.surface as any).uri)).toEqual(["com.epicgames.launcher://apps/Fortnite?action=launch&silent=true", "steam://rungameid/730", undefined]);
+  });
+});
+
 describe("tasks at the same time", () => {
-  test("a web task and an app task run side by side; a second web task waits its turn and says so", async () => {
+  test("two web tasks (two browser windows) and an app task run side by side; a third web task waits its turn and says so", async () => {
     const driver = new SlowSim();
     const plans: Record<string, Plan> = {
       web: { by: "claude", question: "", subtasks: [webPart] },
       notes: { by: "claude", question: "", subtasks: [notepadPart()] },
       web2: { by: "claude", question: "", subtasks: [webPart] },
+      web3: { by: "claude", question: "", subtasks: [webPart] },
     };
     const app = new App(driver, claudeFor(i => plans[i]), jev);
     const progress: string[] = [];
     const seen = new Set<number>();
     app["emit"] = (e: any) => { if (e.type === "state") { seen.add(e.state.running.length); for (const p of Object.values(e.state.progress) as string[]) progress.push(p); } };
-    app.add("web", "typed"); app.add("notes", "typed"); app.add("web2", "typed");
-    for (let i = 0; i < 300 && app.busy; i++) await Bun.sleep(10);
-    expect(app.tasks.map(t => [t.instruction, t.status])).toEqual([["web", "done"], ["notes", "done"], ["web2", "done"]]);
-    expect(seen.has(3)).toBe(true);
-    expect(progress.some(p => p === `waiting for the agent's browser (in use by "web")`)).toBe(true);
-    expect(driver.maxInFlight).toBe(2);
+    for (const name of ["web", "notes", "web2", "web3"]) app.add(name, "typed");
+    for (let i = 0; i < 400 && app.busy; i++) await Bun.sleep(10);
+    expect(app.tasks.map(t => [t.instruction, t.status])).toEqual([["web", "done"], ["notes", "done"], ["web2", "done"], ["web3", "done"]]);
+    expect(seen.has(4)).toBe(true);
+    expect(progress).toContain(`waiting for a browser window (in use by "web")`);
+    expect(driver.maxInFlight).toBe(3);
+    expect([...driver.hands].sort()).toEqual(["Gold-5", "Mint-3", "Red-7"]);
   });
 
   test("stopping one task leaves the others running", async () => {

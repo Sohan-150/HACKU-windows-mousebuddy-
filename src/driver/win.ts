@@ -2,9 +2,10 @@
 //  - browser: the agent's own Chrome/Edge with a throwaway profile (browser route: get_browser_state / browser_type / browser_click)
 //  - app:     any desktop app through UI Automation (get_window_state / click / set_value / type_text / press_key)
 // Measured on this laptop (evidence/): another app stayed in front during every action on both surfaces.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { ActSpec, ActionResult, Driver, DriverCaps, Element, HandName, Observation, WindowSurface, WindowRef } from "../contracts";
+import { HANDS, type ActSpec, type ActionResult, type Driver, type DriverCaps, type Element, type HandName, type Observation, type WindowSurface, type WindowRef } from "../contracts";
 import { cuaCall, cuaText, DriverError, errorOf, merge, toResult } from "./cli";
 import { browserRole, uiaRole } from "./roles";
 
@@ -168,8 +169,9 @@ export class WinDriver implements Driver {
   private async openApp(hand: HandName, app: string, uri?: string): Promise<WindowRef> {
     const before = new Set<number>((await cuaCall("list_windows", { session: hand })).data?.windows?.map((w: any) => w.window_id) ?? []);
     if (uri) {
-      // A link the app handles itself (spotify:search:...): opens the app, or the running one, at that place.
-      Bun.spawn(["cmd", "/c", "start", "", uri], { stdout: "ignore", stderr: "ignore" });
+      // A link the app handles itself (spotify:search:..., a game launcher's launch link): opens the app, or the running
+      // one, at that place.
+      openLink(uri);
       await sleep(2500);
       const w = await this.rebind(hand, { kind: "app", pid: -1, windowId: -1, app, title: "" });
       if (w) return w;
@@ -299,8 +301,19 @@ export class WinDriver implements Driver {
 
   async endAll(): Promise<void> {
     // Ending a session also closes its isolated browser, so this runs only on shutdown when asked.
-    for (const hand of ["Mint-3", "Red-7", "Blue-9"]) await cuaCall("end_session", { session: hand }, 5_000);
+    for (const hand of HANDS) await cuaCall("end_session", { session: hand }, 5_000);
   }
+}
+
+/**
+ * Opens a link with the app registered for it. Through an Internet shortcut file (what Epic's own desktop shortcuts
+ * are), so nothing in the link is read by cmd: "&" in "?action=launch&silent=true" would otherwise end the command.
+ */
+export function openLink(uri: string): void {
+  const file = join(tmpdir(), `agent-link-${Date.now()}.url`);
+  writeFileSync(file, `[InternetShortcut]\r\nURL=${uri.trim().replace(/ /g, "%20")}\r\n`);
+  Bun.spawn(["cmd", "/c", "start", "", file], { stdout: "ignore", stderr: "ignore" });
+  setTimeout(() => { try { unlinkSync(file); } catch { /* still open or gone */ } }, 15_000);
 }
 
 function unsupported(what: string): ActionResult {

@@ -12,7 +12,7 @@ import { DriverError } from "./driver/cli";
 import { FileOpError, planFiles, runFiles } from "./files";
 import { createWordDocument, toParagraphs } from "./office";
 import { GATE, Jev, JEV_USD_PER_INPUT_TOKEN, type StepState } from "./jev";
-import { Locks, RESOURCE_HANDS, RESOURCE_NAMES, resourceFor, Stopped } from "./lanes";
+import { APP_HANDS, BROWSER_HANDS, handsFor, Locks, lockName, locksFor, Stopped } from "./lanes";
 import { perceive, screenText, signature } from "./perceive";
 import { planWithJev, searchUrl } from "./planner";
 import { clickNeedsApproval, personalDetailsMissing, typingForbidden } from "./safety";
@@ -22,8 +22,8 @@ export type JevLike = Pick<Jev, "decide"> & { extra?: Pick<Jev["extra"], "classi
 
 export interface AgentDeps {
   driver: Driver; claude: ClaudeLike | null; jev: JevLike | null; log: Logger; approve: Approver; signal: AbortSignal;
-  hand?: HandName; maxSteps?: number; onStatus?: (s: string) => void;
-  appHand?: HandName;                     // the hand for desktop apps (default Red-7), so they run beside the browser (hand)
+  hand?: HandName; maxSteps?: number; onStatus?: (s: string) => void;   // hand: the first browser window (Mint-3)
+  appHand?: HandName;                     // only this hand for desktop apps (default: the pool in lanes.ts)
   locks?: Locks;                          // shared by every task of the app; without it, the parts of this task share their own
   conversation?: Turn[];                  // earlier tasks this session, for follow-ups ("book the cheapest one")
   /** Answers a question about the user's screen (point-and-ask), for plans that turn out to be one. */
@@ -124,27 +124,44 @@ function needsEarlier(sub: Subtask, k: number): boolean {
     || (sub.surface.kind === "document" && sub.surface.text.includes("{previous answer}"));
 }
 
+/** What a part works in, for progress lines: "YouTube", "Spotify", "Word". */
+export function partLabel(s: Subtask["surface"]): string {
+  if (s.kind === "browser") {
+    try {
+      const u = new URL(s.url), host = u.hostname.replace(/^www\./, "");
+      if (/(^|\.)youtube\.com$/.test(host)) return "YouTube";
+      if (/^google\./.test(host)) return u.pathname.startsWith("/travel/flights") ? "Google Flights" : u.pathname.startsWith("/maps") ? "Google Maps" : "Google";
+      if (/duckduckgo\.com$/.test(host)) return "web search";
+      return host || "web";
+    } catch { return "web"; }
+  }
+  return s.kind === "app" ? s.app : s.kind === "document" ? "Word" : s.kind === "files" ? "files" : "answer";
+}
+
 const shortGoal = (sub: Subtask) => {
   const g = sub.goal.replace(/\s+/g, " ").trim();
   return g.length > 70 ? `${g.slice(0, 67)}...` : g;
 };
 
 /**
- * Runs the parts of a plan. Each takes what it needs (the browser, the app hand, Word, the files) for as long as it
- * runs; parts needing different things run at the same time, parts needing the same thing take turns in plan order.
- * A part that uses what earlier ones found waits for them, and is skipped if one of them failed.
+ * Runs the parts of a plan. Each takes what it needs (its app, Word, the files, then a hand: a browser window or an app
+ * hand) for as long as it runs; parts needing different things run at the same time, parts needing the same thing take
+ * turns in plan order. A part that uses what earlier ones found waits for them, and is skipped if one of them failed.
  */
 async function runParts(task: Task, plan: Plan, deps: AgentDeps): Promise<PartOutcome[]> {
   const locks = deps.locks ?? new Locks();
+  const browserHands = [deps.hand ?? BROWSER_HANDS[0], ...BROWSER_HANDS.filter(h => h !== (deps.hand ?? BROWSER_HANDS[0]))];
+  const appHands = deps.appHand ? [deps.appHand] : APP_HANDS;
   const n = plan.subtasks.length;
   const runs: Promise<PartOutcome>[] = [];
   for (let k = 0; k < n; k++) {
     const earlier = needsEarlier(plan.subtasks[k], k) ? runs.slice(0, k) : [];
-    const status = (s: string) => deps.onStatus?.(n > 1 ? `part ${k + 1}: ${s}` : s);
+    const label = `part ${k + 1} (${partLabel(plan.subtasks[k].surface)})`;
+    const status = (s: string) => deps.onStatus?.(n > 1 ? `${label}: ${s}` : s);
     const partDeps: AgentDeps = { ...deps, onStatus: status };
     runs.push((async (): Promise<PartOutcome> => {
-      let release: (() => void) | undefined;
-      try {
+      const releases: (() => void)[] = [];
+      const outcome = await (async (): Promise<PartOutcome> => { try {
         let notes: string[] = [];
         if (earlier.length) {
           const before = await Promise.all(earlier);
@@ -157,24 +174,30 @@ async function runParts(task: Task, plan: Plan, deps: AgentDeps): Promise<PartOu
         }
         let sub = plan.subtasks[k];
         if (sub.usePreviousAnswer) sub = withPrevious(sub, notes.at(-1) ?? "");
-        const res = resourceFor(sub.surface);
-        if (res) {
-          release = await locks.acquire(res, task.instruction, deps.signal, holder =>
-            status(`waiting for ${RESOURCE_NAMES[res]} (in use by "${holder.slice(0, 60)}")`));
+        const waitFor = (lock: string) => (holder: string) => status(`waiting for ${lockName(lock)} (in use by "${holder.slice(0, 60)}")`);
+        for (const lock of locksFor(sub.surface)) releases.push(await locks.acquire(lock, task.instruction, deps.signal, waitFor(lock)));
+        const pool = handsFor(sub.surface, browserHands, appHands);
+        let hand: HandName | undefined;
+        if (pool.length) {
+          const got = await locks.acquireAny(pool.map(h => `hand:${h}`), task.instruction, deps.signal, waitFor(`hand:${pool[0]}`));
+          releases.push(got.release);
+          hand = got.name.slice(5) as HandName;
         }
         if (deps.signal.aborted) throw new Stopped();
         const r = sub.surface.kind === "answer" ? await answerPart(task, sub, notes, partDeps)
           : sub.surface.kind === "files" ? await runFilesPart(task, k, sub, partDeps)
           : sub.surface.kind === "document" ? await runDocumentPart(task, k, sub, notes, partDeps)
-          : await runWindowPart(task, k, sub, notes, partDeps,
-              sub.surface.kind === "app" ? deps.appHand ?? RESOURCE_HANDS.app! : deps.hand ?? RESOURCE_HANDS.browser!);
+          : await runWindowPart(task, k, sub, notes, partDeps, hand!);
         return { ok: true, ...r };
       } catch (e) {
         const err = asTaskError(e);
         return { ok: false, code: err.code, reason: err.message };
       } finally {
-        release?.();
-      }
+        for (const release of releases.reverse()) release();
+      } })();
+      // The part's line in the progress says how it ended, while the others carry on.
+      if (n > 1 && !(!outcome.ok && outcome.code === "stopped")) status(outcome.ok ? `✓ ${outcome.answer.replace(/\s+/g, " ").slice(0, 140)}` : `✗ ${outcome.reason.slice(0, 140)}`);
+      return outcome;
     })());
   }
   return Promise.all(runs);
@@ -341,7 +364,7 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
   const facts: string[] = [];              // learned during this part; kept for every later step (history keeps 8)
   const readPages = new Set<string>(), scrolls = new Map<string, number>();
   const mediaTried = new Set<string>();
-  let emptyWaits = 0, retriedStuck = false;
+  let emptyWaits = 0, sparseWaits = 0, retriedStuck = false;
   let start: CheckStart | undefined;          // the window when the part started (for the "playing" check)
 
   for (let step = 1; step <= maxSteps; step++) {
@@ -370,9 +393,16 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
     // PERCEIVE + facts in code
     const { items, dropped } = perceive(obs, `${task.instruction} ${sub.goal} ${sub.values.map(v => v.text).join(" ")}`, 120);
     // A page or window that is still loading shows nothing: wait for it (no model call) instead of judging an empty screen.
-    if (!items.length && !obs.text.length && emptyWaits < 8) {
+    // (Apps get longer: Spotify and other web-view apps can show an empty window for several seconds while starting.)
+    if (!items.length && !obs.text.length && emptyWaits < (w.kind === "app" ? 14 : 8)) {
       emptyWaits++; deps.onStatus?.(`step ${step}: waiting for the page to load`);
       await Bun.sleep(700); step--; continue;
+    }
+    // An app that still shows nothing after that draws its window in a way accessibility tools cannot read (some game
+    // launchers): say so now rather than wait on it.
+    if (!items.length && !obs.text.length && w.kind === "app") {
+      const name = obs.title || (surface.kind === "app" ? surface.app : "This app"), uri = surface.kind === "app" ? surface.uri : undefined;
+      throw new TaskError("needs_info", `${name} doesn't show its buttons or text to accessibility tools, so I can't see or use it.${uri ? ` I opened it with its own link (${uri}), so it may already be doing what you asked.` : ""}`);
     }
     emptyWaits = 0;
     if (!start) start = sub.check?.kind === "playing" ? { title: obs.title, playing: !!codeCheck(sub.check, obs, items)?.complete || spotifyPlaying(obs), query: mediaQuery(sub) } : {};
@@ -383,6 +413,12 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
         log.write({ type: "verify", runId: log.runId, t: now(), taskId: task.id, sub: k, complete: true, answer: c.answer, evidence: c.evidence, by: "code", ms: 0 });
         return { answer: c.answer, evidence: c.evidence };
       }
+    }
+    // A player page still filling in (YouTube's results arrive after its header, Spotify's search after its frame):
+    // wait for it, without asking a model.
+    if (sub.check?.kind === "playing" && items.length < 6 && obs.text.length < 3 && sparseWaits < 6) {
+      sparseWaits++; deps.onStatus?.(`step ${step}: waiting for the page to fill in`);
+      await Bun.sleep(800); step--; continue;
     }
     const sig = signature(obs, items);
     if (sig === prevSig) { if (actedLast) idle++; } else { idle = 0; repeats = 0; tried = []; }
@@ -557,7 +593,7 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
         note = "about to give up: trying another way first"; logStep(); actedLast = false;
         history.push(`was about to stop: ${why.slice(0, 160)}`);
         facts.push(`It looked impossible once: ${why.slice(0, 200)}. Another way was tried after that.`);
-        forceWhy = `you were about to stop because: ${why.slice(0, 200)}. Try another way once before stopping: change the search (other dates, a nearby airport or city, fewer filters) or open a different site that has it. Choose stuck again only if there is truly no way`;
+        forceWhy = `you were about to stop because: ${why.slice(0, 200)}. Try another way once before stopping: change the search (other words, dates or places, fewer filters) or open a different site that has it. Choose stuck again only if there is truly no way`;
         deps.onStatus?.(`step ${step}: that didn't work, trying another way`);
         continue;
       }

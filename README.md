@@ -29,7 +29,8 @@ Measured runs are in [evidence/live-jev-only.md](evidence/live-jev-only.md). Win
 | "Write \"call the dentist\" in Notepad", then "write that in Notepad" | Notepad, text read back in code; follow-ups use the last answer |
 | "Organise my Downloads", "convert the PNGs on my Desktop to jpg", "how many PDFs in Documents" | files on disk: preview, approval, check, **Undo** |
 | "Find the weather in Tokyo then write it in Notepad" | multi-step: up to 5 parts, each checked |
-| "Find flights to Botswana and at the same time play Drake on Spotify" | parts that don't need each other run at once (the browser beside a desktop app); one that fails doesn't stop the others |
+| "Find flights to Botswana and at the same time play Drake on Spotify" | parts that don't need each other run at once (two browser windows, two desktop apps); one that fails doesn't stop the others |
+| "Launch Fortnite from Epic Games" | started with the launcher's own link (Steam too); an update or sign-in it needs is reported |
 | "Open my coding folder and tell me what is inside" | found by name, opened in File Explorer, its folders and files listed |
 | Point + "what is this?" / "where is settings?" / "read this" | answered from the window under the pointer; the control is circled |
 | "Where is my Year 1 folder?", "open my tax return" | searched on disk by name ("one" = "1", case and spaces ignored); shown in File Explorer |
@@ -90,12 +91,14 @@ voice helpers as in [native/mac/README.md](native/mac/README.md) (Right-Option);
   (`SPEAK=off` to silence). `VOICE_MODE=draft` puts what you said in the box instead of running it.
 - **Answers on the screen**: a small bubble shows "Listening…", "Thinking…", the answer (next to your pointer for
   point-and-ask, bottom right otherwise), what every running task is doing step by step (and what it is waiting for),
-  approvals and the result of every task, so you never have to switch to the panel. Click it to close it (progress
-  stays away until a task starts or ends); it never takes focus (`BUBBLE=off` to turn it off).
-- **Several tasks at once**: a new task starts right away. Tasks share the computer: the agent's browser, the hand
-  that drives desktop apps (its own red cursor), Word and your files are each used by one part at a time, so a web
-  task runs while an app task waits on a download, and a task that needs something in use waits its turn (the bubble
-  and the panel say so). Each running task has its own **Stop**.
+  approvals and the result of every task, so you never have to switch to the panel. Each part of a task has its own
+  line ("part 2 (Spotify): step 3: clicked 'Play Drake'", then "✓ ..."). Drag it anywhere and later bubbles appear
+  there; it stays while the mouse is on it; click it to close it (progress stays away until a task starts or ends). It
+  never takes focus (`BUBBLE=off` to turn it off).
+- **Several tasks at once**: a new task starts right away. Tasks share the computer: two browser windows (the second
+  opens the first time two web parts run at once), two hands for desktop apps (each its own cursor colour), Word and
+  your files. Parts that need different things run at the same time; two parts in the same app, or a third web part,
+  wait their turn (the bubble and the panel say so). Each running task has its own **Stop**.
 - **Point and ask**: hold Ctrl+Win, point at something, ask "what is this?", "what does this button do?", "where is
   print?", "read this" (with Claude also "how do I make a pivot table?", "circle the zebra and the hippo", "what am I
   looking at?"). The answer is spoken; what it talks about is marked with rings, boxes, arrows or underlines, each with
@@ -118,14 +121,15 @@ voice helpers as in [native/mac/README.md](native/mac/README.md) (Right-Option);
    then stop with a reason rather than guess.
 3. **Done** only when a check agrees: code (Calculator display, text read back, files on disk, Spotify's window title),
    else Claude, else jev's "goal achieved" check plus the line of the page that answers the question.
-4. **Before giving up** on the web (no results, an error), Claude tries once more another way: other dates, a nearby
-   airport or city, another site. An app that keeps downloading or updating is reported ("still busy: Updating 37%")
-   after a few waits, instead of holding up other tasks.
+4. **Before giving up** on the web (no results, an error), Claude tries once more another way: other words, dates or
+   places, another site. An app that keeps downloading or updating is reported ("still busy: Updating 37%") after a
+   few waits, and an app that shows nothing to accessibility tools is reported within seconds, instead of holding up
+   other tasks. A player page that is still filling in (YouTube's results) is waited for without asking a model.
 
 | Module | What it does |
 |---|---|
 | `src/agent.ts` | the task loop: plan, parts at the same time, steps, guardrails, checks |
-| `src/lanes.ts` | what each part needs to itself (browser, app hand, Word, files) and taking turns for it |
+| `src/lanes.ts` | what each part needs to itself (an app, Word, files, then a browser window or an app hand) and taking turns for it |
 | `src/planner.ts` | jev + rules planning (search, flights, directions, weather, calculator, text, files) |
 | `src/jev.ts`, `src/claude.ts` | the two deciders |
 | `src/pointer.ts`, `src/ask.ts`, `src/overlay.ts`, `native/win/overlay.ps1` | point-and-ask: window and control under the pointer (or behind the panel), the answer, pointing back, the marks and the answer bubble |
@@ -152,8 +156,9 @@ image and PDF conversion tests need Windows (System.Drawing, Chrome or Edge).
   Claude can only name the window there.
 - The agent's browser is not signed in anywhere, so mail, calendars and shopping carts need you.
 - jev alone does well when the plan is clear; open-ended multi-page tasks need Claude.
-- There is one agent browser window and one app hand, so two web parts (or two app parts) take turns rather than run
-  at once. The cost shown for tasks that ran at the same time can include some of each other's Claude calls.
+- Two browser windows and two app hands: a third web part (or third app) waits for one to be free, and two parts in
+  the same app always take turns. The second browser window takes the foreground once when it first opens. The cost
+  shown for tasks that ran at the same time can include some of each other's Claude calls.
 - Cua ends a session after 5 idle minutes and closes its browser with it; the app keeps it alive every 60 s.
 
 ## Credits

@@ -222,6 +222,11 @@ async function runParts(task: Task, plan: Plan, deps: AgentDeps): Promise<PartOu
         return { ok: false, code: err.code, reason: err.message };
       } finally {
         for (const release of releases.reverse()) release();
+        // a hand that nobody picks up again: its coloured cursor is hidden, so it doesn't stay on the screen
+        const used = agent.hand as HandName | undefined;
+        if (used && deps.driver.release) {
+          setTimeout(() => { if (!locks.holder(`hand:${used}`)) deps.driver.release!(used).catch(() => {}); }, 1500);
+        }
       } })();
       // The part's line in the progress says how it ended, while the others carry on.
       if (n > 1 && !(!outcome.ok && outcome.code === "stopped")) status(outcome.ok ? `✓ ${outcome.answer.replace(/\s+/g, " ").slice(0, 140)}` : `✗ ${outcome.reason.slice(0, 140)}`);
@@ -244,7 +249,9 @@ async function makePlan(task: Task, deps: AgentDeps): Promise<Plan> {
   let plan: Plan | undefined, ms = 0, deferred = false;
   if (jev?.extra) {
     const r = await planWithJev(task.instruction, jev.extra as any, apps, {
-      defer: claude ? ["web_question", "web_task", "open_app", "chat", "unclear"] : [],
+      // jev + rules plan what they plan well (open an app and use it, play, mute, message, look something up): no
+      // 4-12 s wait for Claude before anything starts. Claude plans the open-ended kinds, and anything unsure.
+      defer: claude ? ["web_task", "chat", "unclear"] : [],
       previousAnswer: deps.conversation?.at(-1)?.answer,
     });
     task.counts.jev += 1; task.cost.jevUsd += r.tokens * JEV_USD_PER_INPUT_TOKEN;
@@ -384,8 +391,10 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
 
   deps.onStatus?.(`opening ${where}`);
   await driver.ensureSession(hand);
+  const tOpen = performance.now();
   let w: WindowRef = await driver.open(hand, surface);
   deps.onWindow?.(w);
+  log.write({ type: "notice", runId: log.runId, t: now(), level: "info", text: `${task.id}/${k}: opened ${where} in ${Math.round(performance.now() - tOpen)} ms` });
   const history: string[] = [`opened ${where}`];
   let tried: string[] = [];
   let prevSig = "", actedLast = false, idle = 0, repeats = 0, rescues = 0, falseDone = 0, reconnects = 0, refusals = 0, waits = 0;
@@ -402,6 +411,7 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
   const appName = surface.kind === "app" ? surface.app : "";
   const wants = goalValues(sub.goal, appName);  // who or what the goal asks to reach, and the texts it gives
   const sendOk = SEND_INTENT.test(sub.goal);    // only then may a message field be filled, or Enter / Send pressed in it
+  let toggleClicks = 0;
 
   for (let step = 1; step <= maxSteps; step++) {
     if (signal.aborted) throw new TaskError("stopped", "stopped by you");
@@ -457,6 +467,33 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
       sparseWaits++; deps.onStatus?.(`step ${step}: waiting for the page to fill in`);
       await Bun.sleep(800); step--; continue;
     }
+    // Mute / unmute / deafen: the toggle is read and pressed in code; done the moment it shows the wanted state
+    const toggle = w.kind === "app" ? toggleGoal(sub.goal) : undefined;
+    if (toggle) {
+      const st = toggleState(toggle, items);
+      const word = toggle.what === "mute" ? (toggle.on ? "muted" : "unmuted") : (toggle.on ? "deafened" : "undeafened");
+      if (st.on === toggle.on) {
+        const evidence = st.on ? `'${st.release!.text}' is shown` : `'${st.press!.text}' is shown and not on`;
+        log.write({ type: "verify", runId: log.runId, t: now(), taskId: task.id, sub: k, complete: true, answer: `You're ${word}.`, evidence, by: "code", ms: 0 });
+        return { answer: `You're ${word} in ${obs.title.replace(/\s+[-–]\s+.*$/, "") || appName}.`, evidence };
+      }
+      const press = toggle.on ? st.press : st.release;
+      if (st.on !== undefined && press && toggleClicks < 2) {
+        toggleClicks++;
+        deps.onStatus?.(`step ${step}: pressing '${press.text}'`);
+        const ta = performance.now();
+        const acted: ActSpec = { tool: "click", token: press.token };
+        const result = await driver.act(hand, w, acted);
+        task.counts.steps++; task.counts.gui++;
+        const decision: Decision = { kind: "click", item: press.i, conf: { kind: 1, item: 1 }, gate: 1, backend: "rule", why: `the goal is to be ${word}; '${press.text}' does that`, model: "rule", inputTokens: 0, outputTokens: 0, ms: 0 };
+        log.write({ type: "step", runId: log.runId, t: now(), taskId: task.id, sub: k, step, window: { title: obs.title, url: obs.url }, items, nDropped: dropped, decision, acted, result,
+          ms: { observe: Math.round(tObs - t0), decide: 0, act: Math.round(performance.now() - ta), total: Math.round(performance.now() - t0) } });
+        history.push(`clicked '${press.text}'`);
+        await Bun.sleep(400);
+        continue;
+      }
+    }
+
     const sig = signature(obs, items);
     if (sig === prevSig) { if (actedLast) idle++; } else { idle = 0; repeats = 0; tried = []; }
     prevSig = sig;
@@ -806,6 +843,28 @@ async function runWindowPart(task: Task, k: number, sub: Subtask, notes: string[
     history.push(describe);
   }
   throw new TaskError("step_limit", `more than ${maxSteps} steps for: ${sub.goal}`);
+}
+
+/** "mute me on Discord", "unmute my mic", "deafen": a call's own toggle, read and pressed in code (no model) */
+export function toggleGoal(goal: string): { what: "mute" | "deafen"; on: boolean } | undefined {
+  const g = goal.toLowerCase();
+  if (/\bun-?mut(e|ed|ing)\b/.test(g)) return { what: "mute", on: false };
+  if (/\bun-?deafen(ed|ing)?\b/.test(g)) return { what: "deafen", on: false };
+  if (/\bdeafen(ed|ing)?\b/.test(g)) return { what: "deafen", on: true };
+  if (/\bmut(e|ed|ing)\b/.test(g)) return { what: "mute", on: true };
+  return undefined;
+}
+
+/** true = muted (or deafened) now, false = not, undefined = no such control on screen. An "Unmute" button means
+ *  muted; a "Mute" button that is on (pressed, checked) means muted; a "Mute" button alone means not muted. Other
+ *  people's tiles ("dark_ravager, Muted") don't start with the word, so they don't count. */
+export function toggleState(t: { what: "mute" | "deafen" }, items: Item[]): { on?: boolean; press?: Item; release?: Item } {
+  const un = items.find(i => new RegExp(`^un${t.what}\\b`, "i").test(i.text.trim()));
+  const plain = items.filter(i => new RegExp(`^${t.what}\\b`, "i").test(i.text.trim()) && i.role !== "text");
+  const pressed = plain.find(i => i.state === "on" || i.state === "checked" || i.state === "selected");
+  if (un || pressed) return { on: true, release: un ?? pressed };
+  if (plain.length) return { on: false, press: plain[0] };
+  return {};
 }
 
 /** jev's check of the screen: is the goal achieved, and (for a question) which line answers it. Reads further down a

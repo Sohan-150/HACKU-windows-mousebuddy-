@@ -16,6 +16,8 @@ function stateOf(e: Element): string | undefined {
   if (e.role === "pop-up") return e.expanded ? "open" : undefined;
   if (e.role === "tab" || e.role === "option" || e.role === "list item") return e.selected ? "selected" : undefined;
   if (e.role === "text field" || e.role === "text area") return e.value ? "has text" : "empty";
+  // a toggle button (Discord's Mute switch keeps its label): its state says whether it is on
+  if ((e.role === "button" || e.role === "menu item") && e.checked) return "on";
   return undefined;
 }
 

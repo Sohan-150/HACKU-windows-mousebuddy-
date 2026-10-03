@@ -4,9 +4,8 @@
 // Deciders: TypeSafe jev first for everything it can do; Claude (optional) for planning that rules can't do, writing
 // text nobody planned, steps jev is unsure about, and reading the result. Every task ends "done" with an answer and
 // its evidence, "partial" (some parts done, the others with their reasons), or "failed" with a coded reason.
-import type {
-  ActSpec, ActionResult, Approver, Check, Decision, Driver, ExceptionCode, HandName, Item, Logger, Observation, Plan, Subtask, Task, WindowRef,
-} from "./contracts";
+import { AGENT_COLOURS, type ActSpec, type ActionResult, type AgentState, type Approver, type Check, type Decision, type Driver, type ExceptionCode,
+  type HandName, type Item, type Logger, type Observation, type Plan, type Subtask, type Task, type WindowRef } from "./contracts";
 import { Claude, ModelError, type Turn } from "./claude";
 import { DriverError } from "./driver/cli";
 import { FileOpError, planFiles, runFiles } from "./files";
@@ -18,13 +17,14 @@ import { planWithJev, searchUrl } from "./planner";
 import { clickNeedsApproval, personalDetailsMissing, typingForbidden } from "./safety";
 
 export type ClaudeLike = Pick<Claude, "plan" | "decide" | "write" | "url" | "verify" | "usage"> & Partial<Pick<Claude, "answerFrom">>;
-export type JevLike = Pick<Jev, "decide"> & { extra?: Pick<Jev["extra"], "classify" | "checkDone"> & Partial<Pick<Jev["extra"], "pickControl">> };
+export type JevLike = Pick<Jev, "decide"> & { extra?: Pick<Jev["extra"], "classify" | "checkDone"> & Partial<Pick<Jev["extra"], "pickControl" | "choose">> };
 
 export interface AgentDeps {
   driver: Driver; claude: ClaudeLike | null; jev: JevLike | null; log: Logger; approve: Approver; signal: AbortSignal;
   hand?: HandName; maxSteps?: number; onStatus?: (s: string) => void;   // hand: the first browser window (Mint-3)
   appHand?: HandName;                     // only this hand for desktop apps (default: the pool in lanes.ts)
   locks?: Locks;                          // shared by every task of the app; without it, the parts of this task share their own
+  onAgent?: (a: AgentState) => void;      // each part as an agent: hand, colour, app, what it is doing, how it ended
   conversation?: Turn[];                  // earlier tasks this session, for follow-ups ("book the cheapest one")
   /** Answers a question about the user's screen (point-and-ask), for plans that turn out to be one. */
   askScreen?: (question: string) => Promise<{ answer: string; evidence: string; jevUsd?: number; by?: "claude" | "jev" | "code" }>;
@@ -157,8 +157,33 @@ async function runParts(task: Task, plan: Plan, deps: AgentDeps): Promise<PartOu
   for (let k = 0; k < n; k++) {
     const earlier = needsEarlier(plan.subtasks[k], k) ? runs.slice(0, k) : [];
     const label = `part ${k + 1} (${partLabel(plan.subtasks[k].surface)})`;
-    const status = (s: string) => deps.onStatus?.(n > 1 ? `${label}: ${s}` : s);
+    // The part as an agent (its widget): who does it, what it is doing now, how it ended.
+    const surface0 = plan.subtasks[k].surface;
+    const agent: AgentState = {
+      id: `${task.id}/${k}`, taskId: task.id, sub: k, name: "", colour: "#8a8f98", app: partLabel(surface0), goal: shortGoal(plan.subtasks[k]),
+      status: "queued", now: earlier.length ? "waiting for the parts before it" : "starting", steps: 0, seconds: 0,
+    };
+    const showAgent = () => {
+      if (agent.startedAt) agent.seconds = Math.round((Date.now() - agent.startedAt) / 100) / 10;
+      deps.onAgent?.({ ...agent });
+    };
+    const logAgent = () => deps.log.write({ type: "agent", runId: deps.log.runId, t: now(), taskId: task.id, agent: { ...agent } });
+    showAgent();
+    const status = (s: string) => {
+      deps.onStatus?.(n > 1 ? `${label}: ${s}` : s);
+      if (/(reading the window|^idle)$/.test(s)) return;
+      const m = s.match(/^step (\d+): (.*)$/);
+      if (m) agent.steps = Math.max(agent.steps, Number(m[1]));
+      agent.now = (m ? m[2] : s).replace(/^deciding$/, "deciding what to do next");
+      showAgent();
+    };
     const partDeps: AgentDeps = { ...deps, onStatus: status };
+    /** the part starts: with a hand (its Cua session and colour), or as a part that needs no window */
+    const started = (hand?: HandName) => {
+      const who = hand ?? (surface0.kind === "document" ? "Amber-4" : surface0.kind === "files" ? "Lime-8" : "Pink-2");
+      Object.assign(agent, { hand, name: who.replace(/-\d+$/, ""), colour: AGENT_COLOURS[who] ?? agent.colour, status: "running", startedAt: Date.now(), now: "starting" });
+      logAgent(); showAgent();
+    };
     runs.push((async (): Promise<PartOutcome> => {
       const releases: (() => void)[] = [];
       const outcome = await (async (): Promise<PartOutcome> => { try {
@@ -184,6 +209,7 @@ async function runParts(task: Task, plan: Plan, deps: AgentDeps): Promise<PartOu
           hand = got.name.slice(5) as HandName;
         }
         if (deps.signal.aborted) throw new Stopped();
+        started(hand);
         const r = sub.surface.kind === "answer" ? await answerPart(task, sub, notes, partDeps)
           : sub.surface.kind === "files" ? await runFilesPart(task, k, sub, partDeps)
           : sub.surface.kind === "document" ? await runDocumentPart(task, k, sub, notes, partDeps)
@@ -197,6 +223,9 @@ async function runParts(task: Task, plan: Plan, deps: AgentDeps): Promise<PartOu
       } })();
       // The part's line in the progress says how it ended, while the others carry on.
       if (n > 1 && !(!outcome.ok && outcome.code === "stopped")) status(outcome.ok ? `✓ ${outcome.answer.replace(/\s+/g, " ").slice(0, 140)}` : `✗ ${outcome.reason.slice(0, 140)}`);
+      Object.assign(agent, outcome.ok ? { status: "done", answer: outcome.answer, now: "done" } : { status: "failed", reason: outcome.code === "stopped" ? "stopped by you" : outcome.reason, now: "" });
+      if (!agent.name) agent.name = "Agent";
+      showAgent(); logAgent();
       return outcome;
     })());
   }

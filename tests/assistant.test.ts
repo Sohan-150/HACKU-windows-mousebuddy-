@@ -1,16 +1,16 @@
-// Point-and-ask (Claude, jev only, nothing under the pointer), spoken commands, conversation memory, and the
-// everyday-request rules (flights, directions, weather, site searches). No network, no Cua.
+// Explain mode without Claude (jev only: what is under the pointer, "where is X"), spoken commands, conversation
+// memory, and the everyday-request rules (flights, directions, weather, site searches). No network, no Cua.
+// (Explain mode with Claude, lessons and placement: tests/backstage.test.ts.)
 import { describe, expect, test } from "bun:test";
-import { askScreen, markTarget, whatIsThis } from "../src/ask";
+import { jevAnswer, whatIsThis, type ScreenView } from "../src/ask";
 import type { Classification, TaskType } from "../src/jev";
 import { SimDriver } from "../src/driver/sim";
 import { assistantPart, directions, flightQuery, planWithJev, siteSearchUrl, weatherPlace } from "../src/planner";
-import { isPointerQuestion, wantsPointing, type PointedElement, type PointerContext } from "../src/pointer";
+import { isPointerQuestion, wantsPointing, type PointedElement, type PointerContext, type ScreenControl } from "../src/pointer";
 import { App } from "../src/server";
 
 process.env.SPEAK = "off";
-process.env.HIGHLIGHT = "off";            // nothing drawn on the screen during tests
-process.env.BUBBLE = "off";
+process.env.OVERLAY = "off";              // nothing drawn on the screen during tests
 const at = { x: 500, y: 400, t: "2026-10-03T00:00:00Z" };
 const el = (index: number, role: string, label: string, x: number, y: number, value?: string): PointedElement => ({ index, role, label, value, frame: { x, y, w: 60, h: 30 } });
 const SAVE = el(3, "Button", "Save", 480, 390), OPEN = el(4, "Button", "Open", 600, 390), BODY = el(5, "Document", "", 0, 0, "Dear team, the meeting moved to Friday.");
@@ -18,9 +18,10 @@ const ctx = (over: Partial<PointerContext> = {}): PointerContext => ({
   ...at, window: { pid: 1, windowId: 2, title: "Untitled - Notepad", app: "Notepad", bounds: { x: 0, y: 0, width: 1000, height: 800 } },
   element: SAVE, nearby: [OPEN], all: [SAVE, OPEN], ...over,
 });
-const noLook = async () => { throw new Error("should use the given context"); };
+const ctl = (e: PointedElement, id: number): ScreenControl => ({ id, role: e.role, label: e.label, frame: e.frame });
+const view = (over: Partial<ScreenView> = {}): ScreenView => ({ controls: [ctl(SAVE, 0), ctl(OPEN, 1)], cursor: { x: 500, y: 400 }, app: "Notepad", windowTitle: "Untitled - Notepad", screen: { x: 0, y: 0, w: 1920, h: 1080 }, ...over });
 
-describe("point-and-ask", () => {
+describe("explain mode without Claude", () => {
   test("which utterances are about the pointer", () => {
     for (const q of ["what is this?", "What does this button do", "where is the save button", "how do I print this page", "can you explain that?", "read this to me"]) expect(isPointerQuestion(q)).toBe(true);
     for (const q of ["open Notepad and write this down", "search for cats on youtube", "find flights to Tokyo", "calculate 5 times 3", "what is the capital of France",
@@ -29,69 +30,34 @@ describe("point-and-ask", () => {
     expect(wantsPointing("what is this")).toBe(false);
   });
 
-  test("Claude answers from the screenshot and controls, and its cursor goes to the control it names", async () => {
-    const seen: any[] = [], pointed: PointedElement[] = [];
-    const claude = { usage: { usd: 0 }, aboutScreen: async (q: string, p: PointerContext, conv: any[]) => { seen.push({ q, p, conv }); claude.usage.usd += 0.004; return { answer: "Click Open to load a file.", marks: [{ control: 1, shape: "ring", label: "Open" }], ms: 5 }; } };
-    const r = await askScreen("how do I open a file here?", at, { hand: "Blue-9", claude: claude as any, jev: null, conversation: [{ instruction: "x", answer: "y" }], look: noLook as any, point: async (_h, e) => { pointed.push(e); return true; } }, ctx());
-    expect(r.by).toBe("claude");
-    expect(r.answer).toBe("Click Open to load a file.");
-    expect(pointed).toEqual([OPEN]);
-    expect(r.pointedAt).toContain("Open");
-    expect(r.claudeUsd).toBeCloseTo(0.004);
-    expect(seen[0].conv).toHaveLength(1);
-  });
-
-  test("Claude can mark several things, including regions of the image that are not controls (image px -> screen px)", async () => {
-    const drawn: any[] = [], pointed: PointedElement[] = [];
-    // window at (100,50), 1000 px wide, screenshot 700 px wide (scale 0.7): image box (350,140,70,35) -> screen (600,250,100,50)
-    const c = ctx({ window: { pid: 1, windowId: 2, title: "Animals of the Okavango", app: "chrome", bounds: { x: 100, y: 50, width: 1000, height: 800 } },
-      screenshot: { path: "none.png", width: 700, height: 560, px: 0, py: 0 } });
-    expect(markTarget({ control: -1, box: { x: 350, y: 140, w: 70, h: 35 }, shape: "ring", label: "cheetah" }, c)!.frame).toEqual({ x: 600, y: 250, w: 100, h: 50 });
-    const claude = { usage: { usd: 0 }, aboutScreen: async () => ({ answer: "The cheetah is top left and the hippo is bottom right; I've circled both.", ms: 1,
-      marks: [{ control: -1, box: { x: 350, y: 140, w: 70, h: 35 }, shape: "ring", label: "cheetah" }, { control: 0, shape: "box", label: "Save" }] }) };
-    const r = await askScreen("circle the cheetah and the save button", at, { hand: "Blue-9", claude: claude as any, jev: null, look: noLook as any,
-      point: async (_h, e) => { pointed.push(e); return true; }, draw: (f, o) => { drawn.push({ f, o }); return true; } }, c);
-    expect(drawn.map(d => [d.o.shape, d.o.label, d.o.color])).toEqual([["ring", "cheetah", 0], ["box", "Save", 1]]);
-    expect(drawn[0].f).toEqual({ x: 600, y: 250, w: 100, h: 50 });
-    expect(pointed[0].role).toBe("region");
-    expect(r.marked).toEqual(["cheetah", "Save"]);
-  });
-
-  test("Claude failing falls back to describing the control (no crash)", async () => {
-    const claude = { usage: { usd: 0 }, aboutScreen: async () => { throw new Error("overloaded"); } };
-    const r = await askScreen("what is this?", at, { hand: "Blue-9", claude: claude as any, jev: null, look: noLook as any, point: async () => true }, ctx());
-    expect(r.by).toBe("code");
-    expect(r.answer).toContain('"Save"');
-  });
-
-  test("jev only: 'where is X' -> jev picks the control, cursor moves there", async () => {
-    const pointed: PointedElement[] = [];
+  test("'where is X': jev picks the control on the screen, and it is ringed", async () => {
     const jev = { extra: { pickControl: async (_q: string, opts: string[]) => ({ index: opts.findIndex(o => o.includes("Open")), conf: 0.9, inputTokens: 120 }) } };
-    const r = await askScreen("where is the open button", at, { hand: "Blue-9", claude: null, jev, look: noLook as any, point: async (_h, e) => { pointed.push(e); return true; } }, ctx());
+    const r = await jevAnswer("where is the open button", view(), jev);
     expect(r.by).toBe("jev");
-    expect(pointed).toEqual([OPEN]);
-    expect(r.answer).toContain("moved my cursor");
+    expect(r.ring?.label).toBe("Open");
+    expect(r.say).toBe(`It's the button "Open". I've circled it.`);
     expect(r.jevTokens).toBe(120);
   });
 
-  test("jev only: unsure pick does not move the cursor", async () => {
-    let moved = false;
+  test("an unsure pick rings nothing", async () => {
     const jev = { extra: { pickControl: async () => ({ index: 0, conf: 0.2, inputTokens: 100 }) } };
-    const r = await askScreen("where is the print button", at, { hand: "Blue-9", claude: null, jev, look: noLook as any, point: async () => (moved = true) }, ctx());
-    expect(moved).toBe(false);
-    expect(r.answer).toContain("couldn't find");
+    const r = await jevAnswer("where is the print button", view(), jev);
+    expect(r.ring).toBeUndefined();
+    expect(r.say).toContain("couldn't find");
   });
 
-  test("jev only: 'what is this' names the control; 'read this' reads its text", () => {
+  test("'what is this' names the control under the pointer; typed in the panel names the window", async () => {
+    expect((await jevAnswer("what is this?", view(), null)).say).toBe(`You're pointing at the button "Save" in "Untitled - Notepad".`);
+    expect((await jevAnswer("what is this?", view({ cursor: undefined, typed: true }), null)).say).toBe(`You're looking at "Untitled - Notepad". Describing what is in it needs a Claude API key.`);
+    expect((await jevAnswer("what is this?", view({ cursor: { x: 5, y: 5 } }), null)).say).toContain("nearest thing I can read");
+  });
+
+  test("whatIsThis: reads text, says what needs Claude", () => {
     expect(whatIsThis("what is this?", ctx())).toBe(`You're pointing at the button "Save" in "Untitled - Notepad".`);
     expect(whatIsThis("read this to me", ctx({ element: BODY }))).toBe("It says: Dear team, the meeting moved to Friday.");
     expect(whatIsThis("explain this", ctx())).toContain("need a Claude API key");
     expect(whatIsThis("what is this", ctx({ element: el(9, "Pane", "", 0, 0) }))).toContain("nearest thing I can read");
-  });
-
-  test("nothing under the pointer", async () => {
-    const r = await askScreen("what is this", at, { hand: "Blue-9", claude: null, jev: null, look: async () => ({ ...at, nearby: [], all: [] }), point: async () => true });
-    expect(r.answer).toContain("can't see a window");
+    expect(whatIsThis("what is this", ctx({ window: undefined, element: undefined, nearby: [] }))).toContain("can't read anything");
   });
 });
 

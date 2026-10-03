@@ -9,6 +9,7 @@ import { whatIsThis } from "../src/ask";
 import { Claude } from "../src/claude";
 import type { Decision, Driver, Kind, Plan } from "../src/contracts";
 import { SimDriver } from "../src/driver/sim";
+import { fromContext, type Capture } from "../src/explain";
 import { findByName, nameTokens, planFiles } from "../src/files";
 import type { Classification, TaskType } from "../src/jev";
 import { MemoryLogger } from "../src/logger";
@@ -17,8 +18,7 @@ import { isScreenQuestion } from "../src/pointer";
 import { App } from "../src/server";
 
 process.env.SPEAK = "off";
-process.env.HIGHLIGHT = "off";
-process.env.BUBBLE = "off";
+process.env.OVERLAY = "off";
 // Absolute on Windows and elsewhere (the planner only works inside an absolute user folder).
 const HOME = join(tmpdir(), "tester-home");
 const cls = (type: TaskType, extra: Partial<Classification> = {}): Classification => ({ type, typeConf: 0.9, appConf: 0, fileOpConf: 0, inputTokens: 300, ms: 1, ...extra });
@@ -48,24 +48,39 @@ describe("screen questions reach point-and-ask, wherever they come from", () => 
   const desktop = (): Driver => Object.assign(new SimDriver(), { caps: { platform: "win32" as const, name: "test desktop" } });
   const settle = async (app: App) => { for (let i = 0; i < 100 && app.tasks.some(t => t.status === "running" || t.status === "planning" || t.status === "queued"); i++) await Bun.sleep(20); };
 
+  // What explain mode sees, without Cua or the overlay: the window behind the panel, or the screen under the pointer.
+  const window = { pid: 1, windowId: 2, title: "Animals of the Okavango - Google Chrome", app: "chrome.exe", bounds: { x: 0, y: 0, width: 800, height: 600 } };
+  const behindPanel = async (): Promise<Capture> => ({ ...fromContext({ x: 400, y: 300, t: "", nearby: [], all: [], typed: true, window }), ms: 1 });
+  const screen = async (): Promise<Capture> => ({ imgW: 960, imgH: 540, screen: { x: 0, y: 0, w: 1920, h: 1080 }, app: "chrome", windowTitle: window.title, controls: [], cursor: { x: 900, y: 500 }, ms: 1 });
+
   test("typed in the panel: answered from the window behind the panel, never planned as a task", async () => {
     let planned = 0;
     const claude = { usage: { inputTokens: 0, outputTokens: 0, usd: 0 }, plan: async () => { planned++; return { plan: { by: "claude", question: "", subtasks: [] } as Plan, ms: 1 }; } } as any;
-    const app = new App(desktop(), claude, null);
+    const app = new App(desktop(), claude, null, "Mint-3", { send: () => false, behindPanel });
     const t = app.add("What am I looking at?", "typed");
     expect(t.status).toBe("running");
     await settle(app);
     expect(planned).toBe(0);
     expect(app.tasks).toHaveLength(1);
     expect(app.tasks[0].status).toBe("done");
+    expect(app.tasks[0].result?.answer).toBe(`You're looking at "Animals of the Okavango - Google Chrome". Describing what is in it needs a Claude API key.`);
     expect(app.tasks[0].result?.evidence).toContain("typed: the window behind the panel");
   });
 
-  test("spoken with no pointer position: the same", async () => {
-    const app = new App(desktop(), null, null);
+  test("spoken: explain mode answers from the screen under the pointer", async () => {
+    const app = new App(desktop(), null, null, "Mint-3", { send: () => false, capture: screen });
     await app.onSpoken("Can you circle the zebra?");
     await settle(app);
     expect(app.tasks.map(t => [t.instruction, t.source, t.status, !!t.plan])).toEqual([["Can you circle the zebra?", "voice", "done", false]]);
+    expect(app.tasks[0].result?.evidence).toStartWith(`pointer at 900,500 in "Animals of the Okavango - Google Chrome"; answered by code`);
+  });
+
+  test("the screen can't be seen: the question fails and says why", async () => {
+    const app = new App(desktop(), null, null, "Mint-3", { send: () => false, capture: async () => ({ imgW: 0, imgH: 0, screen: { x: 0, y: 0, w: 0, h: 0 }, controls: [], ms: 0, error: "Cua is not running" }) });
+    await app.onSpoken("what is this?");
+    await settle(app);
+    expect(app.tasks[0].status).toBe("failed");
+    expect(app.tasks[0].exception?.reason).toContain("Cua is not running");
   });
 
   test("the simulator keeps the old behaviour (no screen to look at)", async () => {

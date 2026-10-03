@@ -180,6 +180,14 @@ export class JevExtra {
     return { index: a.choice === "none" ? undefined : Number(a.choice), conf: a.confidence, inputTokens: data.usage?.input_tokens ?? 0 };
   }
 
+  /** One typed question with named options (the router: a job for the agents, or a question about the screen?). */
+  async choose(question: string, options: Record<string, string>, state: object): Promise<{ choice: string; confidence: number; inputTokens: number }> {
+    const req = { state, questions: { answer: { type: "choice", instructions: question, criteria: options } } };
+    const { data } = await this.ts.systemOne(req as any).withResponse();
+    const a: any = data.answers.answer;
+    return { choice: a.choice, confidence: a.confidence, inputTokens: data.usage?.input_tokens ?? 0 };
+  }
+
   /** Is the goal visibly achieved? For a question, which line of screen text answers it? */
   async checkDone(s: StepState, question: boolean): Promise<DoneCheck> {
     const lines = s.screenText.filter(l => l.length >= 3).slice(0, 200).map(l => l.slice(0, 300));

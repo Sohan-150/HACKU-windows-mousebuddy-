@@ -82,6 +82,55 @@ async function lookAtWindow(hand: HandName, under: any, at: { x: number; y: numb
   return ctx;
 }
 
+/** A control the user can see, for explain mode: exact frame in physical screen pixels, numbered for the model. */
+export interface ScreenControl { id: number; role: string; label: string; frame: Frame }
+
+// UI Automation control types worth pointing at (Cua reports them as the role), like the Mac version's AX list.
+const ACTIONABLE = /^(Button|SplitButton|MenuItem|MenuBar|Hyperlink|Edit|Document|Text|CheckBox|RadioButton|ComboBox|TabItem|ListItem|TreeItem|DataItem|Image|Slider|Spinner|Header|HeaderItem)$/;
+
+/** The labelled controls of some windows, numbered, without duplicates (at most `max`). Exported for tests. */
+export function controlList(elements: any[][], max = 150, on?: Frame): ScreenControl[] {
+  const seen = new Set<string>();
+  const out: ScreenControl[] = [];
+  for (const els of elements) {
+    for (const e of els) {
+      const f = e?.frame;
+      if (!f || f.w < 4 || f.h < 4 || !ACTIONABLE.test(String(e.role ?? ""))) continue;
+      if (on && (f.x + f.w <= on.x || f.y + f.h <= on.y || f.x >= on.x + on.w || f.y >= on.y + on.h)) continue;   // on another screen
+      const label = String(e.label || e.value || "").replace(/\s+/g, " ").trim().slice(0, 60);
+      if (!label) continue;
+      const key = `${e.role}|${label}|${Math.round(f.x)}|${Math.round(f.y)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ id: out.length, role: String(e.role), label, frame: { x: f.x, y: f.y, w: f.w, h: f.h } });
+      if (out.length >= max) return out;
+    }
+  }
+  return out;
+}
+
+/**
+ * Explain mode: the controls the user can see right now, with their exact frames. Read from the window under the
+ * cursor and the topmost window (a small window can sit on top of the one being pointed at), like the Mac version.
+ */
+export async function screenControls(hand: HandName, cursor?: { x: number; y: number }, on?: Frame): Promise<{ controls: ScreenControl[]; app?: string; windowTitle?: string }> {
+  const lw = await cuaCall("list_windows", { session: hand }, 6000);
+  const vis = visibleWindows(lw).filter((w: any) => w.title !== "Program Manager");
+  const under = cursor ? vis.find((w: any) => contains({ x: w.bounds.x, y: w.bounds.y, w: w.bounds.width, h: w.bounds.height }, cursor.x, cursor.y)) : undefined;
+  const wins = [under, vis[0]].filter((w, i, a) => w && a.findIndex(x => x?.window_id === w.window_id) === i);
+  if (!wins.length) return { controls: [] };
+  const lists: any[][] = [];
+  for (const w of wins) {
+    const st = await cuaCall("get_window_state", { session: hand, pid: w.pid, window_id: w.window_id, max_elements: 800, timeout_ms: 2500, include_screenshot: false }, 8000);
+    if (!errorOf(st.data)) lists.push(st.data.elements ?? []);
+  }
+  return {
+    controls: controlList(lists, 150, on),
+    app: wins.map((w: any) => String(w.app_name ?? "").replace(/\.exe$/i, "")).filter(Boolean).join(" + ") || undefined,
+    windowTitle: wins.map((w: any) => w.title).filter(Boolean).join(" / "),
+  };
+}
+
 /** Glides the agent's coloured cursor to a control (the real mouse pointer is not moved). */
 export async function pointAt(hand: HandName, e: PointedElement): Promise<boolean> {
   const r = await cuaCall("move_cursor", { session: hand, scope: "window", x: Math.round(e.frame.x + e.frame.w / 2), y: Math.round(e.frame.y + e.frame.h / 2) });

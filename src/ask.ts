@@ -1,90 +1,49 @@
-// Point-and-ask: answers a question about what the user is pointing at (or looking at). Read-only: looks at one window,
-// answers, and draws on the screen: circles, boxes, arrows or underlines around the things it talks about, and glides
-// the agent's own cursor to the first. It never clicks or types.
-//   Claude: sees a screenshot of that one window + its controls; may mark several controls or regions of the image.
-//   jev only: says what the control under the pointer is (and reads its text); for "where is X" jev picks the control.
-import { unlinkSync } from "node:fs";
-import type { HandName } from "./contracts";
-import type { Claude, ScreenMark, Turn } from "./claude";
-import { GATE, JEV_USD_PER_INPUT_TOKEN, type JevExtra } from "./jev";
-import { drawMark, type Shape } from "./overlay";
-import { describeElement, lookAt, pointAt, wantsPointing, type PointedElement, type PointerContext } from "./pointer";
+// Screen questions without Claude (jev only), for explain mode: say what the control under the pointer is and read its
+// text; for "where is X" jev picks the control (it is then ringed on the screen). Read-only: never clicks or types.
+// Explaining and drawing freely from the picture of the screen needs Claude (explain.ts).
+import { GATE, type JevExtra } from "./jev";
+import { describeElement, wantsPointing, type Frame, type PointedElement, type PointerContext, type ScreenControl } from "./pointer";
 
-export interface AskDeps {
-  hand: HandName;
-  claude: Pick<Claude, "aboutScreen" | "usage"> | null;
-  jev: { extra?: Partial<Pick<JevExtra, "pickControl">> } | null;
-  conversation?: Turn[];
-  look?: typeof lookAt; point?: typeof pointAt;                          // injectable for tests
-  draw?: (r: PointedElement["frame"], o: { shape?: Shape; label?: string; color?: number; ms?: number }) => boolean;
+/** what jevAnswer looks at: the controls on the screen (exact frames), where the pointer is, the window */
+export interface ScreenView {
+  controls: ScreenControl[];
+  cursor?: { x: number; y: number };
+  app?: string; windowTitle?: string;
+  screen: Frame;
+  typed?: boolean;
 }
 
-export interface AskResult {
-  answer: string; by: "claude" | "jev" | "code";
-  window?: string; element?: string; pointedAt?: string; marked: string[];
-  jevTokens: number; claudeUsd: number; ms: number;
-}
+export interface JevAnswer { say: string; ring?: ScreenControl; by: "jev" | "code"; jevTokens: number }
 
-/** `ctx` may be given when the window was already looked at (prefetched while speech was being transcribed). */
-export async function askScreen(question: string, at: { x: number; y: number; t: string }, deps: AskDeps, ctx?: PointerContext): Promise<AskResult> {
-  const t0 = performance.now();
-  const look = deps.look ?? lookAt, point = deps.point ?? pointAt, draw = deps.draw ?? drawMark;
-  const usd0 = deps.claude?.usage.usd ?? 0;
-  const p = ctx ?? await look(deps.hand, at, { screenshot: !!deps.claude });
-  const out: AskResult = { answer: "", by: "code", window: p.window?.title, element: p.element ? describeElement(p.element) : undefined, marked: [], jevTokens: 0, claudeUsd: 0, ms: 0 };
-  const finish = (): AskResult => {
-    if (p.screenshot) try { unlinkSync(p.screenshot.path); } catch { /* already gone */ }
-    out.claudeUsd = (deps.claude?.usage.usd ?? 0) - usd0;
-    out.ms = Math.round(performance.now() - t0);
-    return out;
-  };
-  if (!p.window) {
-    out.answer = p.typed ? "I can't see the window you were using. Click on it, then ask again (or point at it, hold the talk keys and ask)."
-      : "I can't see a window under your pointer. Point at something in an app or web page and ask again.";
-    return finish();
-  }
+const inside = (f: Frame, x: number, y: number) => x >= f.x && y >= f.y && x <= f.x + f.w && y <= f.y + f.h;
+const dist = (f: Frame, x: number, y: number) => Math.hypot(f.x + f.w / 2 - x, f.y + f.h / 2 - y);
 
-  const targets: { el: PointedElement; shape: Shape; label: string }[] = [];
-  if (deps.claude) {
+export async function jevAnswer(question: string, v: ScreenView, jev: { extra?: Partial<Pick<JevExtra, "pickControl">> } | null): Promise<JevAnswer> {
+  const pick = jev?.extra?.pickControl?.bind(jev.extra);
+  if (wantsPointing(question) && pick && v.controls.length) {
+    // "where is the save button": jev picks one of the labelled controls on the screen.
     try {
-      const r = await deps.claude.aboutScreen(question, p, deps.conversation ?? []);
-      out.answer = r.answer.trim(); out.by = "claude";
-      for (const m of r.marks) {
-        const el = markTarget(m, p);
-        if (el) targets.push({ el, shape: m.shape, label: m.label });
-      }
-    } catch { /* fall through to the jev answer below */ }
+      const r = await pick(question, v.controls.map(c => `${c.role} "${c.label}"`));
+      const hit = r.index !== undefined && r.conf >= GATE ? v.controls[r.index] : undefined;
+      if (hit) return { say: `It's ${describeElement(asElement(hit))}. I've circled it.`, ring: hit, by: "jev", jevTokens: r.inputTokens };
+      return { say: `I couldn't find that on your screen.`, by: "jev", jevTokens: r.inputTokens };
+    } catch { /* answer from what is under the pointer */ }
   }
-  if (!out.answer) {
-    const pick = deps.jev?.extra?.pickControl?.bind(deps.jev.extra);
-    if (wantsPointing(question) && pick && p.all.length) {
-      // "where is the save button": jev picks one of the window's labelled controls.
-      const options = p.all.map(e => `${e.role} "${e.label}"`);
-      let target: PointedElement | undefined;
-      try {
-        const r = await pick(question, options);
-        out.jevTokens += r.inputTokens; out.by = "jev";
-        if (r.index !== undefined && r.conf >= GATE && p.all[r.index]) target = p.all[r.index];
-      } catch { /* answer from what is under the pointer */ }
-      if (target) targets.push({ el: target, shape: "ring", label: target.label.slice(0, 24) });
-      out.answer = target ? `It's ${describeElement(target)}. I've circled it and moved my cursor to it.` : `I couldn't find that in "${p.window.title}".`;
-    } else {
-      out.answer = whatIsThis(question, p);
-    }
-  }
-  // Draw every mark (each its own colour), then glide the cursor to the first one.
-  const ms = targets.length > 1 || targets.some(t => t.el.role === "region") ? 7000 : 3500;
-  targets.forEach((t, i) => { if (draw(t.el.frame, { shape: t.shape, label: targets.length > 1 || t.el.role === "region" ? t.label : "", color: i, ms })) out.marked.push(t.label || describeElement(t.el)); });
-  if (targets[0] && await point(deps.hand, targets[0].el).catch(() => false)) out.pointedAt = targets[0].el.role === "region" ? targets[0].label || "the place I marked" : describeElement(targets[0].el);
-  return finish();
+  return { say: whatIsThis(question, asContext(v)), by: "code", jevTokens: 0 };
 }
 
-/** A mark from Claude -> something on screen: a control's frame, or a box in the window image -> screen pixels. */
-export function markTarget(m: ScreenMark, p: PointerContext): PointedElement | undefined {
-  if (m.control >= 0) return p.all[m.control];
-  if (!m.box || !p.screenshot || !p.window) return undefined;
-  const b = p.window.bounds, scale = p.screenshot.width / b.width;
-  return { index: -1, role: "region", label: m.label, frame: { x: b.x + m.box.x / scale, y: b.y + m.box.y / scale, w: m.box.w / scale, h: m.box.h / scale } };
+const asElement = (c: ScreenControl): PointedElement => ({ index: c.id, role: c.role, label: c.label, frame: c.frame });
+
+/** the screen view as a pointer context (what whatIsThis reads) */
+function asContext(v: ScreenView): PointerContext {
+  const at = v.cursor ?? { x: v.screen.x + v.screen.w / 2, y: v.screen.y + v.screen.h / 2 };
+  const els = v.controls.map(asElement);
+  const element = v.cursor ? els.filter(e => inside(e.frame, at.x, at.y)).sort((a, b) => a.frame.w * a.frame.h - b.frame.w * b.frame.h)[0] : undefined;
+  return {
+    ...at, t: new Date().toISOString(), typed: v.typed || !v.cursor,
+    window: v.windowTitle ? { pid: 0, windowId: 0, title: v.windowTitle, app: v.app ?? "", bounds: { x: v.screen.x, y: v.screen.y, width: v.screen.w, height: v.screen.h } } : undefined,
+    element, nearby: els.filter(e => e !== element).sort((a, b) => dist(a.frame, at.x, at.y) - dist(b.frame, at.x, at.y)).slice(0, 12), all: els,
+  };
 }
 
 /** Without Claude: name the control under the pointer and read its text; say plainly what needs Claude. */
@@ -103,5 +62,3 @@ export function whatIsThis(question: string, p: PointerContext): string {
   const needsClaude = /\b(explain|translate|summari[sz]e|mean|why|circle|draw|highlight)\b/i.test(question) ? " Explaining and drawing need a Claude API key." : "";
   return `${near} ${describeElement(e)}${where}.${needsClaude}`;
 }
-
-export const jevAskUsd = (r: AskResult) => r.jevTokens * JEV_USD_PER_INPUT_TOKEN;

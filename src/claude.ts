@@ -97,9 +97,10 @@ Turn the instruction into as few parts as possible; each part happens in one pla
 - surface "files": organise, move, copy, convert (images between PNG/JPG/BMP/GIF/TIFF; text, HTML or images to PDF; CSV/JSON), list files, or find a file or folder by name ("where is my Year 1 folder", "open my tax return"): file_op "find" with the name as the user said it in "file_name" and folder "" (their whole user folder). Fill file_op, folder (a full path, or Desktop/Downloads/Documents/Pictures/Music/Videos, optionally with a sub-folder like "Downloads\\\\scans"), dest (move/copy), exts (file types without dots, e.g. ["png"]), file_name and to_format (convert). Only folders inside the user folder are allowed.
 - "goal": what must be true when the part is done, in one sentence. If the user asked for information, say the answer must be visible on screen.
 - "values": every exact text the agent will need to type in this part (search terms, names, message text, dates, numbers), each with a short name.
+- "needs_previous": true only if this part uses what an earlier part finds (write the weather in Notepad, compare two prices). Parts with false run at the same time as the others when they can (the browser and a desktop app side by side), so set it whenever the order matters.
 Unused fields are "" or []. If the instruction cannot be started without more information, put the question for the user in "question" and return no parts; otherwise "question" is "".`;
     const str = { type: "string" };
-    const fields = ["surface", "url", "app", "uri", "goal", "values", "reply", "doc_title", "doc_text", "file_op", "folder", "dest", "exts", "file_name", "to_format"];
+    const fields = ["surface", "url", "app", "uri", "goal", "values", "needs_previous", "reply", "doc_title", "doc_text", "file_op", "folder", "dest", "exts", "file_name", "to_format"];
     const schema = {
       type: "object", additionalProperties: false, required: ["question", "about_screen", "subtasks"],
       properties: {
@@ -109,6 +110,7 @@ Unused fields are "" or []. If the instruction cannot be started without more in
           type: "object", additionalProperties: false, required: fields,
           properties: {
             surface: { type: "string", enum: ["answer", "browser", "app", "document", "files"] }, url: str, app: str, uri: str, goal: str, reply: str,
+            needs_previous: { type: "boolean" },
             doc_title: str, doc_text: str,
             values: { type: "array", items: { type: "object", additionalProperties: false, required: ["name", "text"], properties: { name: str, text: str } } },
             file_op: { type: "string", enum: ["", "organize", "move", "copy", "convert", "list", "find"] }, folder: str, dest: str,
@@ -142,7 +144,10 @@ Write the answer for the user in a few plain sentences, using only these results
     const prompt = `${stateText(s, 9000)}
 
 You are deciding this step because: ${why}.
-Choose one action. "item" is the number of the control to use, or -1 if none is needed. For "type", put the exact text in "text" (it replaces what the field holds); after typing into a search or autocomplete box, the suggestions usually appear as new controls on the next step. For "go_to_url", put the full address in "url". Use "done" only if the goal is visibly achieved now; use "stuck" if the goal cannot be reached from here (explain why in "reason", written for the user).`;
+Choose one action. "item" is the number of the control to use, or -1 if none is needed. For "type", put the exact text in "text" (it replaces what the field holds); after typing into a search or autocomplete box, the suggestions usually appear as new controls on the next step. For "go_to_url", put the full address in "url". Use "done" only if the goal is visibly achieved now; use "stuck" if the goal cannot be reached from here (explain why in "reason", written for the user).
+- On the web, if the page shows no results or an error, change the search (other dates, a nearby airport or city, fewer filters) or try another site before choosing stuck.
+- If an app is downloading, updating or installing something that will take more than a minute, or needs the user to sign in, choose stuck and say what it is doing and how far along it is.
+- "reason": always say in a few words what you are doing and why; the user sees it as progress.`;
     const kinds: Kind[] = ["click", "type", "press_enter", "scroll_down", "scroll_up", "go_to_url", "wait", "done", "stuck"];
     const schema = {
       type: "object", additionalProperties: false, required: ["kind", "item", "text", "url", "reason"],
@@ -243,7 +248,7 @@ The assistant can draw on the screen: put one entry in "marks" for each thing to
 /** Something to draw for point-and-ask: a control from the list, or a box in the window image (image pixels). */
 export interface ScreenMark { control: number; box?: { x: number; y: number; w: number; h: number }; shape: "ring" | "box" | "arrow" | "underline"; label: string }
 
-type RawPart = { surface: "answer" | "browser" | "app" | "document" | "files"; url: string; app: string; uri: string; goal: string; reply: string;
+type RawPart = { surface: "answer" | "browser" | "app" | "document" | "files"; url: string; app: string; uri: string; goal: string; reply: string; needs_previous: boolean;
   doc_title: string; doc_text: string; values: { name: string; text: string }[];
   file_op: string; folder: string; dest: string; exts: string[]; file_name: string; to_format: string };
 
@@ -251,8 +256,13 @@ const SAFE_URI = /^(spotify|mailto|ms-settings):/i;
 const PLAYING = /\b(play|playing|listen)\b/i;
 
 function toSubtask(raw: Partial<RawPart>): Subtask {
+  const sub = partOf(raw);
+  return raw.needs_previous ? { ...sub, needsPrevious: true } : sub;
+}
+
+function partOf(raw: Partial<RawPart>): Subtask {
   // Defaults for every field, so an older or partial reply cannot crash planning.
-  const s: RawPart = { surface: "browser", url: "", app: "", uri: "", goal: "", reply: "", doc_title: "", doc_text: "", values: [], file_op: "", folder: "", dest: "", exts: [], file_name: "", to_format: "", ...raw };
+  const s: RawPart = { surface: "browser", url: "", app: "", uri: "", goal: "", reply: "", needs_previous: false, doc_title: "", doc_text: "", values: [], file_op: "", folder: "", dest: "", exts: [], file_name: "", to_format: "", ...raw };
   // value names become classifier options: keep them unique and non-empty
   const values = s.values.filter(v => v.text).map((v, i) => ({ name: (v.name.trim() || `value ${i + 1}`).slice(0, 40) + (s.values.slice(0, i).some(p => p.name.trim() === v.name.trim()) ? ` ${i + 1}` : ""), text: v.text }));
   const goal = s.goal.trim();
@@ -270,7 +280,8 @@ function toSubtask(raw: Partial<RawPart>): Subtask {
     if (s.file_op === "find") {
       const what = `${s.file_name} ${goal}`;
       const want = /\b(folder|directory)\b/i.test(what) ? "folder" as const : /\.\w{2,4}\b|\b(file|document|pdf|photo|picture|spreadsheet|essay)\b/i.test(what) ? "file" as const : "any" as const;
-      return { surface: { kind: "files", op: { op: "find", folder: s.folder ? resolveFolder(s.folder) : homedir(), name: s.file_name || goal, want, open: /\b(open|show)\b/i.test(goal) } }, goal, values: [], question: true };
+      const list = /\b(what('?s| is)? (inside|in it|in there)|contents?|list)\b/i.test(what);
+      return { surface: { kind: "files", op: { op: "find", folder: s.folder ? resolveFolder(s.folder) : homedir(), name: s.file_name || goal, want, open: /\b(open|show)\b/i.test(goal), ...(list ? { list } : {}) } }, goal, values: [], question: true };
     }
     const folder = resolveFolder(s.folder || "Desktop"), match = { exts: s.exts.length ? s.exts.map(e => e.replace(/^\./, "").toLowerCase()) : undefined, name: s.file_name || undefined };
     const op: FileOp = s.file_op === "organize" ? { op: "organize", folder }

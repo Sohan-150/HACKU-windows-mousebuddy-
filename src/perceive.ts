@@ -8,6 +8,7 @@ const INPUTS: Role[] = ["text field", "text area", "pop-up", "radio", "checkbox"
 const WINDOW_CHROME = /^(minimi[sz]e|maximi[sz]e|restore|close|system)( .*)?$/i;
 
 export const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+const URL_VALUE = /^(?:https?:\/\/)?(?:[\w-]+\.)+[a-z]{2,}(?::\d+)?\/\S*$/i;
 const words = (s: string) => new Set(norm(s).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 2));
 
 function stateOf(e: Element): string | undefined {
@@ -35,6 +36,9 @@ export function perceive(obs: Observation, goal: string, cap = 80): { items: Ite
     // Apps built on an embedded browser (Spotify, Teams) expose its hidden address bar; typing there would navigate
     // the app away. The agent's own browser is driven through the page, so it never needs one either.
     if (obs.window.kind === "app" && /^(address and search bar|address bar|search or enter (web )?address)$/i.test(label)) continue;
+    // The same bar under another name (Spotify calls it after the page, "Spotify – Search"): a field in an app whose
+    // text is a web address.
+    if (obs.window.kind === "app" && (e.role === "text field" || e.role === "text area") && URL_VALUE.test(String(e.value ?? "").trim())) continue;
     // Unlabelled inputs are told apart by their position among unlabelled inputs of the same role (stable across
     // snapshots, unlike element indexes, which move with focus).
     const id = label ? `${e.role}:${label.toLowerCase()}` : `${e.role}:#${(unlabelled[e.role] = (unlabelled[e.role] ?? 0) + 1)}`;

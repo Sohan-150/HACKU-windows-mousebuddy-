@@ -7,7 +7,11 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 const SCRIPT = join(import.meta.dir, "..", "native", "win", "overlay.ps1");
-let proc: Subprocess<"pipe", "ignore", "ignore"> | null = null;
+let proc: Subprocess<"pipe", "pipe", "ignore"> | null = null;
+const closedListeners = new Set<() => void>();
+
+/** Called when the user clicks the bubble away. */
+export function onBubbleClosed(f: () => void): void { closedListeners.add(f); }
 
 export type Shape = "ring" | "box" | "arrow" | "underline";
 export interface Rect { x: number; y: number; w: number; h: number }
@@ -18,10 +22,31 @@ const available = () => process.platform === "win32" && existsSync(SCRIPT);
 export function warmOverlay(): void {
   if (!available() || proc) return;
   try {
-    proc = Bun.spawn(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", SCRIPT],
-      { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
-    proc.exited.then(() => { proc = null; });
+    const p = Bun.spawn(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", SCRIPT],
+      { stdin: "pipe", stdout: "pipe", stderr: "ignore" });
+    proc = p;
+    p.exited.then(() => { if (proc === p) proc = null; });
+    void readEvents(p.stdout);
   } catch { proc = null; }
+}
+
+/** The helper's stdout: "bubble-closed" when the user clicks the bubble away (and its start-up line). */
+export async function readEvents(out: ReadableStream<Uint8Array>) {
+  const dec = new TextDecoder(), reader = out.getReader();
+  let buf = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (line === "bubble-closed") for (const f of closedListeners) { try { f(); } catch { /* a listener never stops the overlay */ } }
+      }
+    }
+  } catch { /* the helper exited */ }
 }
 
 function send(msg: object): boolean {

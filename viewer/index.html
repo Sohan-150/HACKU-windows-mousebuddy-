@@ -58,9 +58,11 @@
   .pill.queued, .pill.stopped { background: var(--line); color: var(--muted); }
   .pill.planning, .pill.running { background: var(--run-bg); color: var(--run); }
   .pill.done { background: var(--good-bg); color: var(--good); }
+  .pill.partial { background: var(--warn-bg); color: var(--warn); }
+  .progress { margin-top: 6px; color: var(--run); font-size: 13px; white-space: pre-line; overflow-wrap: anywhere; }
   .pill.failed { background: var(--bad-bg); color: var(--bad); }
-  .answer { margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: var(--good-bg); overflow-wrap: anywhere; }
-  .reason { margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: var(--bad-bg); overflow-wrap: anywhere; }
+  .answer { margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: var(--good-bg); overflow-wrap: anywhere; white-space: pre-line; }
+  .reason { margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: var(--bad-bg); overflow-wrap: anywhere; white-space: pre-line; }
   .meta { color: var(--muted); font-size: 12.5px; margin-top: 6px; font-family: var(--mono); overflow-wrap: anywhere; }
   .evidence { color: var(--muted); font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
   #feed { font: 12.5px/1.55 var(--mono); max-height: 620px; overflow: auto; }
@@ -150,22 +152,28 @@ function renderState(s) {
 
   const tasks = [...s.tasks].reverse();
   $("tasks").replaceChildren(...(tasks.length ? tasks.map(t => {
+    const live = s.running.includes(t.id);
     const box = el("div", { className: "task" },
-      el("div", { className: "row spread" }, el("span", { className: "instr", textContent: t.instruction }), el("span", { className: `pill ${t.status}`, textContent: t.status })));
+      el("div", { className: "row spread" }, el("span", { className: "instr", textContent: t.instruction }),
+        el("span", { className: "row" },
+          ...(live ? [el("button", { className: "danger", textContent: "Stop", title: "Stop this task only", onclick: () => post("/api/stop", { taskId: t.id }) })] : []),
+          el("span", { className: `pill ${t.status}`, textContent: t.status }))));
+    if (live && s.progress?.[t.id]) box.append(el("div", { className: "progress", textContent: s.progress[t.id] }));
     if (t.result) {
       box.append(el("div", { className: "answer", textContent: t.result.answer }));
       if (t.result.evidence) box.append(el("div", { className: "evidence", textContent: `Evidence on screen: ${t.result.evidence}` }));
     }
-    if (t.exception) box.append(el("div", { className: "reason", textContent: `${t.exception.code.replace("_", " ")}: ${t.exception.reason}` }));
+    if (t.exception && t.status !== "partial") box.append(el("div", { className: "reason", textContent: `${t.exception.code.replace("_", " ")}: ${t.exception.reason}` }));
     if (t.endedAt) {
       const c = t.counts, secs = ((Date.parse(t.endedAt) - Date.parse(t.startedAt)) / 1000).toFixed(1);
       box.append(el("div", { className: "meta", textContent: `${secs} s · ${c.steps} steps · jev ${c.jev} calls, Claude ${c.claude} · ${c.gui} GUI actions${c.files ? ` · ${c.files} file actions` : ""} · ${c.approvals} approvals · cost $${(t.cost.jevUsd + t.cost.claudeUsd).toFixed(5)}` }));
     }
     return box;
   }) : [el("p", { className: "hint", textContent: "No tasks yet." })]));
-  $("stop").disabled = !s.running && !s.tasks.some(t => t.status === "queued");
+  $("stop").disabled = !s.running.length && !s.tasks.some(t => t.status === "queued");
+  $("stop").textContent = s.running.length > 1 ? "Stop all" : "Stop";
   $("undo").hidden = !s.canUndo;
-  $("undo").disabled = !!s.running;
+  $("undo").disabled = s.running.length > 0;
 }
 
 function feedLine(node, cls = "") {
@@ -177,13 +185,17 @@ function feedLine(node, cls = "") {
 }
 const txt = s => document.createTextNode(s);
 
-const where = sf => sf.kind === "browser" ? sf.url : sf.kind === "app" ? sf.app : sf.kind === "files" ? `files: ${sf.op.op}` : "answered directly";
+const where = sf => sf.kind === "browser" ? sf.url : sf.kind === "app" ? sf.app : sf.kind === "files" ? `files: ${sf.op.op}` : sf.kind === "document" ? `Word: ${sf.title}` : "answered directly";
+const partsOf = {};                   // task -> number of parts in its plan (several can run at the same time)
 function onLog(l) {
   if (l.type === "task_start") feedLine(txt(`▶ ${l.task.instruction}  (deciders: ${l.deciders.join(" + ") || "none"})`), "dim");
   else if (l.type === "plan") {
     if (l.plan.question) feedLine(txt(`plan: needs more information: ${l.plan.question}`), "warn");
     else if (l.plan.aboutScreen) feedLine(txt(`plan (${l.plan.by}): a question about your screen → answered from the window`), "dim");
-    else l.plan.subtasks.forEach((s, i) => feedLine(txt(`plan ${i + 1} (${l.plan.by}): ${where(s.surface)} → ${s.goal}${s.values.length ? `  [texts: ${s.values.map(v => v.name).join(", ")}]` : ""}${s.check ? "  [checked in code]" : ""}`), "dim"));
+    else {
+      partsOf[l.taskId] = l.plan.subtasks.length;
+      l.plan.subtasks.forEach((s, i) => feedLine(txt(`plan ${i + 1} (${l.plan.by}): ${where(s.surface)} → ${s.goal}${s.values.length ? `  [texts: ${s.values.map(v => v.name).join(", ")}]` : ""}${s.check ? "  [checked in code]" : ""}${s.needsPrevious || s.usePreviousAnswer ? "  [after the parts before it]" : ""}`), "dim"));
+    }
   } else if (l.type === "step") {
     const d = l.decision, it = d.item !== undefined ? l.items[d.item] : null;
     const who = el("span", { className: `who ${d.backend}`, textContent: d.backend });
@@ -192,13 +204,14 @@ function onLog(l) {
     const extra = d.kind === "type" && l.acted?.text !== undefined ? ` ← ${JSON.stringify(l.acted.text.slice(0, 60))}` : l.acted?.url ? ` ${l.acted.url}` : "";
     const res = l.result ? (l.result.ok ? ` · ${l.ms.act} ms` : ` · refused: ${l.result.error?.code}`) : "";
     const why = d.backend === "claude" && d.why ? `  (${d.why})` : "";
-    const node = el("span", {}, who, txt(`#${l.step} ${d.kind}${what}${extra}${p}${res}${l.note ? ` · ${l.note}` : ""}${why}`));
+    const part = partsOf[l.taskId] > 1 ? `part ${l.sub + 1} ` : "";
+    const node = el("span", {}, who, txt(`${part}#${l.step} ${d.kind}${what}${extra}${p}${res}${l.note ? ` · ${l.note}` : ""}${why}`));
     feedLine(node, l.result && !l.result.ok ? "bad" : "");
   } else if (l.type === "approval") feedLine(txt(`approval ${l.approved ? "given" : "denied"}: ${l.request.action}`), l.approved ? "good" : "warn");
   else if (l.type === "verify") feedLine(txt(`check (${l.by}): ${l.complete ? "done" : "not done yet"} — ${l.evidence}`), l.complete ? "good" : "warn");
   else if (l.type === "files") feedLine(txt(`files: ${l.results.length ? `${l.results.filter(r => r.ok).length}/${l.results.length} done — ${l.results.slice(0, 3).map(r => r.detail).join("; ")}` : "looked, nothing changed"}`), l.results.every(r => r.ok) ? "good" : "bad");
   else if (l.type === "ask") feedLine(txt(`ask (${l.by}): "${l.question}" — pointer on ${l.element ?? "nothing readable"}${l.window ? ` in "${l.window}"` : ""} → ${l.answer}${l.pointedAt ? `  [cursor moved to ${l.pointedAt}]` : ""} · ${l.ms} ms`), "good");
-  else if (l.type === "task_end") feedLine(txt(`■ ${l.task.status}${l.task.exception ? ` (${l.task.exception.code}): ${l.task.exception.reason}` : `: ${l.task.result?.answer ?? ""}`}`), l.task.status === "done" ? "good" : "bad");
+  else if (l.type === "task_end") feedLine(txt(`■ ${l.task.status}${l.task.status === "partial" ? `: ${l.task.result?.answer ?? ""}` : l.task.exception ? ` (${l.task.exception.code}): ${l.task.exception.reason}` : `: ${l.task.result?.answer ?? ""}`}`), l.task.status === "done" ? "good" : l.task.status === "partial" ? "warn" : "bad");
 }
 
 function onVoice(v) {

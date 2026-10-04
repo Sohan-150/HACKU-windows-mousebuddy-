@@ -64,9 +64,31 @@ const KINDS = ["ring", "box", "circle", "arrow", "underline", "label"] as const;
 const NEXT = 'Say "next" when you\'re ready.';
 // Sizes from the Mac version (screen points) scaled to typical Windows physical pixels (150% scaling).
 const S = 1.5;
-const ACK = /^(next|next step|continue|go on|ok|okay|done|got it|and then|then what)$/;
-const AGAIN = /^(repeat|again|say that again|what|huh|sorry|come again|back|previous)$/;
-const DISMISS = /^(stop|cancel|clear|never ?mind|hide|that's all|thanks|thank you)$/;
+// lesson words, with what speech recognition often makes of them ("next" -> "nest", "neck", "text"; "quit" -> "quite",
+// "quiet"), said alone or with a filler around them ("okay next", "next please", "um, quit")
+const ACK = /^(next|nest|neck|necks|nexus|text|continue|go on|carry on|keep going|ok|okay|done|did it|got it|yes|yeah|yep|alright|all right|and then|then what|what's next|whats next|go|go ahead|(go to |show me |give me |on to |onto |what's |whats |what is )?(the )?next( one| step| part| thing)?)$/;
+const BACK = /^((go )?back( a step| one step| one)?|(the )?previous( step| one)?|(the )?last step|step back)$/;
+const AGAIN = /^(repeat|again|say that again|say it again|repeat that|repeat the step|one more time|what|huh|sorry|pardon|come again)$/;
+const DISMISS = /^(stop|cancel|clear|clear it|clear the screen|clear screen|never ?mind|hide|hide it|that's all|thats all|that's enough|thats enough|enough|thanks|thank you|quit|quite|quiet|exit|end|end it|finish|finished|close|close it|i'm done|im done|all done|done with this|no more|go away|bye|goodbye|stop the lesson|end the lesson|stop drawing)$/;
+const FILLER_BEFORE = /^((um+|uh+|er+|erm|ok|okay|so|and|now|alright|all right|right|please|hey|backstage|then)\s+)+/;
+const FILLER_AFTER = /(\s+(please|thanks|thank you|now|then|backstage|for me))+$/;
+
+/** what a short reply means in a lesson, in code: "next" (continue), "back", "again" (say it again), "dismiss" (stop and
+ *  clear the drawings), or undefined (a real question). Exported: the router and the server use it too. */
+export function lessonWord(text: string): "next" | "back" | "again" | "dismiss" | undefined {
+  const w = text.toLowerCase().replace(/[.!?,;:"\u201c\u201d]/g, " ").replace(/\s+/g, " ").trim();
+  if (!w || w.split(" ").length > 6) return undefined;
+  const core = w.replace(FILLER_BEFORE, "").replace(FILLER_AFTER, "").trim() || w;
+  for (const x of [w, core]) {
+    if (DISMISS.test(x)) return "dismiss";
+    if (BACK.test(x)) return "back";
+    if (AGAIN.test(x)) return "again";
+    if (ACK.test(x)) return "next";
+  }
+  return undefined;
+}
+/** a lesson step's drawings fade after this long, even if nothing more is said ("next" still continues the lesson) */
+const STEP_MS = 60_000;
 
 export class Explainer {
   private pending?: Promise<Capture>;
@@ -92,10 +114,10 @@ export class Explainer {
 
   get inLesson() { return !!this.lesson; }
 
-  /** words handled without looking at the screen: "never mind", and "next" / "repeat" / "back" during a lesson */
+  /** words handled without looking at the screen: "never mind", "quit", and "next" / "repeat" / "back" (in a lesson or
+   *  not: with none going on, there is nothing to continue and nothing new is asked) */
   inCode(text: string): boolean {
-    const w = text.toLowerCase().replace(/[.!?,]/g, "").trim();
-    return !w || DISMISS.test(w) || (!!this.lesson && (ACK.test(w) || AGAIN.test(w)));
+    return !text.trim() || !!lessonWord(text);
   }
 
   /** move through a lesson (spoken words, or the overlay's keys: Alt + arrow) */
@@ -134,10 +156,20 @@ export class Explainer {
     const out: ExplainResult = { answer: "", steps: 0, shapes: 0, by: "code", usd: 0, jevTokens: 0, ms: 0 };
     const finish = () => { out.usd = (this.deps.claude?.usage.usd ?? 0) - usd0; out.ms = Math.round(performance.now() - t0); return out; };
     const q = text.trim();
-    const w = q.toLowerCase().replace(/[.!?,]/g, "").trim();
-    if (!q || DISMISS.test(w)) { this.discard(); this.dismiss(); out.answer = q ? "Cleared." : ""; return finish(); }
-    if (this.lesson && ACK.test(w)) { this.discard(); out.answer = this.go("next") ?? ""; out.steps = 1; return finish(); }
-    if (this.lesson && AGAIN.test(w)) { this.discard(); out.answer = this.go(/back|previous/.test(w) ? "back" : "repeat") ?? ""; out.steps = 1; return finish(); }
+    const word = lessonWord(q);
+    if (!q || word === "dismiss") { this.discard(); this.dismiss(); out.answer = q ? "Cleared." : ""; return finish(); }
+    if (word) {
+      this.discard();
+      if (!this.lesson) {
+        // nothing to continue: say so (and clear anything left on the screen) rather than asking about the word
+        this.deps.send({ cmd: "clear" });
+        out.answer = "There's no lesson going on. Ask me how to do something.";
+        this.say(out.answer, 4000);
+        return finish();
+      }
+      out.answer = this.go(word === "next" ? "next" : word === "back" ? "back" : "repeat") ?? ""; out.steps = 1;
+      return finish();
+    }
 
     this.status("looking at your screen…");
     const capP = opts.capture ?? this.pending ?? this.capture(cursor);
@@ -167,7 +199,8 @@ export class Explainer {
         out.handoff = true; out.by = "claude"; out.answer = "a job for the agents";
         return finish();
       }
-      const steps = r.answer.steps.filter(s => s.say?.trim()).slice(0, 6).map(s => ({ say: s.say.trim(), shapes: (s.shapes ?? []).slice(0, 4).flatMap(m => place(m, cap)) }));
+      // at most 3 drawings a step: more is clutter (a "what do I see" once drew 34)
+      const steps = r.answer.steps.filter(s => s.say?.trim()).slice(0, 6).map(s => ({ say: s.say.trim(), shapes: (s.shapes ?? []).slice(0, 3).flatMap(m => place(m, cap)).slice(0, 4) }));
       if (!steps.length) return this.fail(out, "Sorry, I don't have an answer for that.", finish);
       this.lesson = { question: q, steps, index: 0 };
       out.by = "claude"; out.steps = steps.length; out.shapes = steps.reduce((a, s) => a + s.shapes.length, 0);
@@ -206,7 +239,7 @@ export class Explainer {
     const total = l.steps.length;
     const more = total > 1 && l.index < total - 1;
     // a lesson step stays until you continue; a single answer fades
-    this.answer(this.sayFor(l.index), s.shapes, more ? 0 : 9000, total > 1 ? { index: l.index, total } : undefined);
+    this.answer(this.sayFor(l.index), s.shapes, more ? STEP_MS : 9000, total > 1 ? { index: l.index, total } : undefined);
     if (more) for (const t of this.sayFor(l.index + 1)) for (const p of Voice.parts(t)) void this.voice.speak(p); // fetch the next step while this one plays
     return s.say;
   }

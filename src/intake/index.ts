@@ -10,7 +10,7 @@ export type VoiceEvent =
   | { event: "down"; t: number }
   | { event: "up"; t: number; ms: number }
   | { event: "cancel"; reason: string }                                  // Ctrl was part of a shortcut, or only tapped
-  | { event: "transcript"; lang: string; text: string; ms: number; audio_ms?: number }
+  | { event: "transcript"; lang: string; text: string; ms: number; audio_ms?: number; maybe_noise?: boolean }   // maybe_noise: also what silence turns into ("thank you")
   | { event: "error"; msg: string };
 
 const ROOT = join(import.meta.dir, "..", "..");

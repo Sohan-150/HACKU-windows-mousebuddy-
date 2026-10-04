@@ -14,6 +14,15 @@
 #   {"id":4,"op":"read","hwnd":456,"max":1500}   the window's controls in ONE cached call (name, type, frame, value,
 #        toggle, selected, expanded, enabled, offscreen) -> {"ok":true,"seq":7,"title":"...","elements":[{"i":0,...}]}
 #   {"id":5,"op":"press","ref":"456:7:12"} / {"op":"type","ref":"456:7:12","text":"hi"}   act on a control from that read
+#   {"id":6,"op":"windows"}   every visible top-level window (like Cua's list_windows, in milliseconds)
+#   {"id":8,"op":"front_type","hwnd":456,"ref":"456:7:12","text":"hi","vk":13,"cx":0,"cy":0,"replace":true}
+#        the foreground fallback: the window comes to the front, the control is focused and the screen point cx,cy (if
+#        any) clicked ("soft": only when it could not be focused), SendInput types (Unicode; replace = Ctrl+A first) and/or presses the key vk, the user's window
+#        goes back. A target can also be given like a press (pid, x, y, w, h,
+#        role, label); with no target it types into whatever the window has focused.
+#   {"id":7,"op":"shot","hwnd":456,"max":1280}   a picture of the window for the model -> {path, imgW, imgH, k, sx, sy}; a
+#        point (x, y) in it is window-local pixel (x*k, y*k) for Cua's click (same origin as Cua's own screenshots), and
+#        screen pixel (sx + x*k, sy + y*k)
 #   -> {"id":1,"ok":true,"ms":3.1,"how":"hit-test invoke"}  or  {"id":1,"ok":false,"error":"..."}
 # On start it prints {"ready":true}. Coordinates are physical screen pixels (the same space as Cua's frames).
 #
@@ -23,7 +32,7 @@
 # Invoke: after 1.5 s it is reported as done (it happened), so Cua never presses a second time. Nothing is done
 # after 3 s of looking (the server would have given up and asked Cua by the time it was done).
 $ErrorActionPreference = "Stop"
-Add-Type -ReferencedAssemblies UIAutomationClient, UIAutomationTypes, WindowsBase, System.Web.Extensions -TypeDefinition @"
+Add-Type -ReferencedAssemblies UIAutomationClient, UIAutomationTypes, WindowsBase, System.Web.Extensions, System.Drawing -TypeDefinition @"
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -41,6 +50,216 @@ public static class FastLane {
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);
     [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr hWnd, int cmd);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr hWnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hWnd, StringBuilder s, int max);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hWnd, int index);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
+    [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hWnd, IntPtr hdc, uint flags);
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hWnd, int attr, out RECT value, int size);
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] static extern int DwmGetInt(IntPtr hWnd, int attr, out int value, int size);
+    delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] struct WINDOWPLACEMENT { public int length, flags, showCmd; public int minX, minY, maxX, maxY; public RECT normal; }
+    [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT wp);
+    static readonly Dictionary<uint, string> exeOf = new Dictionary<uint, string>();
+
+    // ---- the foreground fallback: SendInput into a field, for apps that ignore background typing (web editors in
+    // WebView2 / Electron apps such as WhatsApp). The window comes to the front for a moment, then the user's goes back.
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int cmd);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+    [DllImport("user32.dll", EntryPoint = "GetWindowThreadProcessId")] static extern uint ThreadOf(IntPtr hWnd, IntPtr pid);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)] struct InputUnion { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+    [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public InputUnion u; }
+    [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] inputs, int size);
+
+    static INPUT Key(ushort vk, ushort scan, uint flags) {
+        var i = new INPUT(); i.type = 1; i.u.ki.wVk = vk; i.u.ki.wScan = scan; i.u.ki.dwFlags = flags; return i;
+    }
+
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+    static readonly object frontLock = new object();
+
+    static INPUT Mouse(uint flags) {
+        var i = new INPUT(); i.type = 0; i.u.mi.dwFlags = flags; return i;
+    }
+
+    static bool Front(IntPtr h) {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            // a zero mouse move makes this process the last one to send input, which lets it set the foreground
+            if (attempt > 0) SendInput(1, new INPUT[] { Mouse(1) }, Marshal.SizeOf(typeof(INPUT)));
+            var fg = GetForegroundWindow();
+            uint me = GetCurrentThreadId(), other = fg == IntPtr.Zero ? 0 : ThreadOf(fg, IntPtr.Zero);
+            bool attached = other != 0 && other != me && AttachThreadInput(me, other, true);
+            if (IsIconic(h)) ShowWindow(h, 9);
+            BringWindowToTop(h); SetForegroundWindow(h);
+            if (attached) AttachThreadInput(me, other, false);
+            for (int i = 0; i < 8 && GetForegroundWindow() != h; i++) Thread.Sleep(15);
+            if (GetForegroundWindow() == h) return true;
+        }
+        return false;
+    }
+
+    /** focus the control and click the point (a web view's renderer only takes real keyboard focus from a click), type
+     *  the text (Unicode keystrokes; replace = select all first) and/or press a key (vk), with its window in front for a
+     *  moment; one at a time (there is one foreground) */
+    static string FrontType(AutomationElement e, IntPtr window, string text, int vk, int clickX, int clickY, bool replace, bool soft) {
+        RECT wr;
+        if (clickX > 0 && GetWindowRect(window, out wr) && (clickX < wr.Left || clickX >= wr.Right || clickY < wr.Top || clickY >= wr.Bottom))
+            throw new Exception("the point is outside the window");
+        // one at a time; a request that waited 4 s for another agent's turn gives up (the server stops waiting at 8 s, and
+        // must never see it done late)
+        if (!Monitor.TryEnter(frontLock, 4000)) throw new Exception("the foreground was busy with another agent");
+        try {
+            var before = GetForegroundWindow();
+            try {
+                if (!Front(window)) throw new Exception("the window would not come to the front");
+                Thread.Sleep(80);
+                string how = "";
+                bool focused = false;
+                if (e != null) { try { e.SetFocus(); focused = true; how = "focus "; } catch { } Thread.Sleep(60); }
+                if (clickX > 0 && clickY > 0 && !(soft && focused)) {
+                    // a real click on the field, and the pointer goes back
+                    POINT was; GetCursorPos(out was);
+                    SetCursorPos(clickX, clickY);
+                    SendInput(2, new INPUT[] { Mouse(2), Mouse(4) }, Marshal.SizeOf(typeof(INPUT)));   // LEFTDOWN, LEFTUP
+                    Thread.Sleep(120);
+                    SetCursorPos(was.X, was.Y);
+                    how += "click ";
+                }
+                var keys = new List<INPUT>();
+                text = text ?? "";
+                if (replace && text != "") {   // Ctrl+A: the field's old text is replaced, as a background type would
+                    keys.Add(Key(0x11, 0, 0)); keys.Add(Key(0x41, 0, 0)); keys.Add(Key(0x41, 0, 2)); keys.Add(Key(0x11, 0, 2));
+                }
+                foreach (char c in (text ?? "").Replace("\r", "").Replace("\n", " ")) { keys.Add(Key(0, c, 4)); keys.Add(Key(0, c, 4 | 2)); }   // KEYEVENTF_UNICODE (| KEYUP)
+                if (vk > 0) { keys.Add(Key((ushort)vk, 0, 0)); keys.Add(Key((ushort)vk, 0, 2)); }
+                if (keys.Count > 0) {
+                    // (a click alone is done whatever came to the front after it, a dialog it opened for one: never
+                    // reported as failed, so it is never clicked a second time)
+                    if (GetForegroundWindow() != window) throw new Exception("the window lost the front before typing");
+                    uint sent = SendInput((uint)keys.Count, keys.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+                    if (sent != keys.Count) throw new Exception("the keystrokes were blocked");
+                }
+                Thread.Sleep(Math.Min(1000, 150 + 2 * keys.Count));   // the app takes the keys before its window goes back
+                return (how + (text != "" ? "typed " : "") + (vk > 0 ? "key " + vk + " " : "") + "in front").Trim();
+            } finally {
+                if (before != IntPtr.Zero && before != window) Front(before);   // the user's window goes back in front
+            }
+        } finally { Monitor.Exit(frontLock); }
+    }
+
+    static string Exe(uint pid) {
+        lock (exeOf) {
+            string n;
+            if (exeOf.TryGetValue(pid, out n)) return n;
+            try { n = Process.GetProcessById((int)pid).ProcessName + ".exe"; } catch { n = ""; }
+            exeOf[pid] = n;
+            return n;
+        }
+    }
+
+    static string TitleOf(IntPtr h) {
+        int n = GetWindowTextLength(h);
+        if (n <= 0) return "";
+        var sb = new StringBuilder(n + 1);
+        GetWindowText(h, sb, sb.Capacity);
+        return sb.ToString();
+    }
+
+    /** every top-level window a person could see, top to bottom (EnumWindows: milliseconds, no new process) */
+    static void Windows(Dictionary<string, object> d) {
+        var list = new List<object>();
+        var order = new List<IntPtr>();
+        EnumProc cb = (h, l) => { order.Add(h); return true; };
+        EnumWindows(cb, IntPtr.Zero);
+        GC.KeepAlive(cb);
+        for (int i = 0; i < order.Count; i++) {
+            var h = order[i];
+            if (!IsWindowVisible(h)) continue;
+            int cloaked; if (DwmGetInt(h, 14, out cloaked, 4) == 0 && cloaked != 0) continue;   // DWMWA_CLOAKED: on another desktop, or a hidden app frame
+            string title = TitleOf(h);
+            if (title == "") continue;
+            RECT r; if (!GetWindowRect(h, out r)) continue;
+            bool small = IsIconic(h);
+            if (small) {
+                // a minimised window sits at -32000 with a title bar's size: its size when shown again is what counts
+                var wp = new WINDOWPLACEMENT(); wp.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
+                if (GetWindowPlacement(h, ref wp)) r = wp.normal;
+            }
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            var w = new Dictionary<string, object>();
+            w["window_id"] = (long)h; w["pid"] = (long)pid; w["title"] = title; w["app_name"] = Exe(pid);
+            var b = new Dictionary<string, object>(); b["x"] = r.Left; b["y"] = r.Top; b["width"] = r.Right - r.Left; b["height"] = r.Bottom - r.Top;
+            w["bounds"] = b; w["minimized"] = small; w["z_index"] = order.Count - i;
+            list.Add(w);
+        }
+        d["ok"] = true; d["windows"] = list;
+    }
+
+    /** a picture of one window (PrintWindow: covered windows too), cropped like Cua's screenshots (the visible frame
+     *  plus a 1 px inset), so a point in it is a window-local pixel for Cua's click; scaled for the model */
+    static void Shot(Dictionary<string, object> r, Dictionary<string, object> d) {
+        var h = new IntPtr((long)Num(r, "hwnd"));
+        int max = (int)Num(r, "max"); if (max <= 0) max = 1280;
+        RECT wr; if (!GetWindowRect(h, out wr)) throw new Exception("no such window");
+        if (IsIconic(h)) throw new Exception("the window is minimised");
+        int ww = wr.Right - wr.Left, wh = wr.Bottom - wr.Top;
+        if (ww < 20 || wh < 20) throw new Exception("the window is too small");
+        RECT fr; int ox = 0, oy = 0, cw = ww, ch = wh;
+        if (DwmGetWindowAttribute(h, 9, out fr, 16) == 0) { ox = fr.Left + 1 - wr.Left; oy = fr.Top + 1 - wr.Top; cw = fr.Right - fr.Left - 2; ch = fr.Bottom - fr.Top - 2; }
+        using (var full = new System.Drawing.Bitmap(ww, wh, System.Drawing.Imaging.PixelFormat.Format32bppArgb)) {
+            using (var g = System.Drawing.Graphics.FromImage(full)) {
+                IntPtr dc = g.GetHdc();
+                bool ok;
+                try { ok = PrintWindow(h, dc, 2); } finally { g.ReleaseHdc(dc); }
+                if (!ok) throw new Exception("the window could not be captured");
+            }
+            double k = Math.Max(1.0, Math.Max(cw, ch) / (double)max);
+            int iw = (int)Math.Round(cw / k), ih = (int)Math.Round(ch / k);
+            var path = Path.Combine(Path.GetTempPath(), "backstage-window-" + DateTime.Now.Ticks + ".png");
+            using (var small = new System.Drawing.Bitmap(iw, ih, System.Drawing.Imaging.PixelFormat.Format24bppRgb)) {
+                using (var g = System.Drawing.Graphics.FromImage(small)) {
+                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    g.DrawImage(full, new System.Drawing.Rectangle(0, 0, iw, ih), new System.Drawing.Rectangle(ox, oy, cw, ch), System.Drawing.GraphicsUnit.Pixel);
+                }
+                small.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+            }
+            d["ok"] = true; d["path"] = path; d["imgW"] = iw; d["imgH"] = ih; d["k"] = k; d["winW"] = cw; d["winH"] = ch;
+            d["sx"] = wr.Left + ox; d["sy"] = wr.Top + oy;   // the picture's top-left corner on the screen
+        }
+    }
+
+    /** the same app's pop-ups over a window (menus, drop-downs, context menus are windows of their own) */
+    static List<IntPtr> PopupsOf(IntPtr main) {
+        uint pid; GetWindowThreadProcessId(main, out pid);
+        var found = new List<IntPtr>();
+        EnumProc cb = (h, l) => {
+            if (h == main || !IsWindowVisible(h)) return true;
+            uint p; GetWindowThreadProcessId(h, out p);
+            if (p != pid) return true;
+            const int WS_POPUP = unchecked((int)0x80000000);
+            int style = GetWindowLong(h, -16), ex = GetWindowLong(h, -20);
+            bool popup = (style & WS_POPUP) != 0 || (ex & 0x8) != 0 || GetWindow(h, 4) == main;   // a pop-up, topmost, or owned by the window
+            RECT r; if (!popup || !GetWindowRect(h, out r) || r.Right - r.Left < 8 || r.Bottom - r.Top < 8) return true;
+            found.Add(h);
+            return found.Count < 4;
+        };
+        EnumWindows(cb, IntPtr.Zero);
+        GC.KeepAlive(cb);
+        return found;
+    }
 
     static readonly object writeLock = new object();
     static readonly JavaScriptSerializer json = new JavaScriptSerializer();
@@ -62,10 +281,19 @@ public static class FastLane {
         cr.Add(AutomationElement.IsEnabledProperty); cr.Add(AutomationElement.IsOffscreenProperty);
         cr.Add(ValuePattern.ValueProperty); cr.Add(TogglePattern.ToggleStateProperty); cr.Add(SelectionItemPattern.IsSelectedProperty);
         cr.Add(ExpandCollapsePattern.ExpandCollapseStateProperty);
-        AutomationElementCollection all;
-        using (cr.Activate()) all = root.FindAll(TreeScope.Descendants, Automation.ControlViewCondition);
+        var collections = new List<AutomationElementCollection>();
+        using (cr.Activate()) {
+            // an open menu or drop-down is a window of its own: read it first, it is what the user is looking at
+            if (Str(r, "popups") != "False") {
+                foreach (var ph in PopupsOf(new IntPtr(hw))) {
+                    try { var pr = AutomationElement.FromHandle(ph); if (pr != null) collections.Add(pr.FindAll(TreeScope.Subtree, Automation.ControlViewCondition)); } catch { }
+                }
+            }
+            collections.Add(root.FindAll(TreeScope.Descendants, Automation.ControlViewCondition));
+        }
         var list = new List<object>();
         var keep = new List<AutomationElement>();
+        foreach (var all in collections)
         foreach (AutomationElement e in all) {
             if (keep.Count >= max) break;
             Rect f; ControlType ct;
@@ -284,6 +512,28 @@ public static class FastLane {
                 return;
             }
             if (op == "read") { Read(r, d); d["ms"] = Math.Round(sw.Elapsed.TotalMilliseconds, 1); Reply(d); return; }
+            if (op == "windows") { Windows(d); d["ms"] = Math.Round(sw.Elapsed.TotalMilliseconds, 1); Reply(d); return; }
+            if (op == "shot") { Shot(r, d); d["ms"] = Math.Round(sw.Elapsed.TotalMilliseconds, 1); Reply(d); return; }
+            if (op == "front_type") {
+                var win = new IntPtr((long)Num(r, "hwnd"));
+                AutomationElement target = null;
+                string rf = Str(r, "ref");
+                if (rf != "") target = FromRef(rf);
+                else if (Num(r, "w") > 0) {
+                    var tt = new Target(); tt.Pid = (int)Num(r, "pid"); tt.Hwnd = (long)Num(r, "hwnd");
+                    tt.R = new Rect(Num(r, "x"), Num(r, "y"), Num(r, "w"), Num(r, "h")); tt.Role = Str(r, "role").Replace(" ", ""); tt.Label = Str(r, "label");
+                    string how0; target = Locate(tt, sw, out how0);
+                }
+                if (win == IntPtr.Zero) throw new Exception("no window");
+                if (target == null && (rf != "" || Num(r, "w") > 0) && Num(r, "cx") <= 0) throw new Exception("the field was not found (and no point to click)");
+                if (target != null && Num(r, "cx") > 0) {
+                    bool off = false; try { off = target.Current.IsOffscreen; } catch { }
+                    if (off) throw new Exception("the control is out of view: scroll to it first");
+                }
+                int vk = (int)Num(r, "vk"); if (vk <= 0 && Str(r, "enter") == "True") vk = 0x0D;
+                d["ok"] = true; d["how"] = FrontType(target, win, Str(r, "text"), vk, (int)Num(r, "cx"), (int)Num(r, "cy"), Str(r, "replace") == "True", Str(r, "soft") == "True");
+                d["ms"] = Math.Round(sw.Elapsed.TotalMilliseconds, 1); Reply(d); return;
+            }
             string reference = Str(r, "ref");
             if (reference != "") {
                 // a control from the latest read: no search, act at once

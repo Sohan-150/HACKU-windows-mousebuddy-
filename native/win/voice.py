@@ -28,7 +28,8 @@ import numpy as np
 
 RATE = 16000
 MIN_HOLD_MS = 400                      # shorter presses are ordinary key use, not speech
-# What whisper says for silence or noise; dropped unless the user really said more.
+# What whisper says for silence or noise. Sent marked "maybe_noise": the agent keeps one only when it means something
+# then ("okay" or "thank you" during a lesson, "okay" to a yes/no question).
 HALLUCINATIONS = {"you", "thank you", "thank you.", "thanks for watching", "thanks for watching!", "bye", "bye.", ".", "okay.", "so"}
 KEEP_LANGS = ("en", "yue", "zh")       # English, Cantonese, (written) Chinese
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
@@ -56,7 +57,7 @@ LANG = None   # set from --lang; "en" by default (English dictation)
 # Words the assistant hears a lot: a hint for the speech model, so "deafen" isn't "defin" and "Drake" isn't "Dracons".
 # VOICE_WORDS in .env adds your own (names of friends, apps, songs), comma separated.
 HINT = ("Spotify, Discord, WhatsApp, YouTube, Chrome, Calculator, Notepad, Word, Excel, VS Code, Steam, Epic Games, "
-        "Drake, mute, unmute, deafen, undeafen, message")
+        "Drake, mute, unmute, deafen, undeafen, message, next, back, repeat, quit")
 if os.environ.get("VOICE_WORDS"):
     HINT += " " + os.environ["VOICE_WORDS"].replace(",", ", ").strip()
 
@@ -209,9 +210,11 @@ def listen(model, key_name, max_seconds=30):
                 continue
             try:
                 r = transcribe(model, audio)
-                if r["text"].strip().lower() in HALLUCINATIONS or not r["text"].strip():
+                if not r["text"].strip():
                     emit("error", msg="didn't catch that: hold the keys and speak a little louder")
                     continue
+                if r["text"].strip().lower() in HALLUCINATIONS:
+                    r["maybe_noise"] = True
                 emit("transcript", **r)
             except Exception as e:   # keep listening after one bad clip
                 emit("error", msg=f"transcription failed: {e}")

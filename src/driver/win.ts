@@ -1,11 +1,12 @@
-// Windows driver (Cua Driver 0.32.0). Two surfaces, both driven in the background:
+// Windows driver (Cua Driver 0.32.0). Two surfaces, both driven in the background (an app that drops background input,
+// such as the web page inside WhatsApp, gets its window in front for a moment for that one action):
 //  - browser: the agent's own Chrome/Edge with a throwaway profile (browser route: get_browser_state / browser_type / browser_click)
 //  - app:     any desktop app through UI Automation (get_window_state / click / set_value / type_text / press_key)
 // Measured on this laptop (evidence/): another app stayed in front during every action on both surfaces.
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { HANDS, type ActionNote, type ActSpec, type ActionResult, type Driver, type DriverCaps, type Element, type HandName, type Observation, type WindowSurface, type WindowRef } from "../contracts";
+import { HANDS, type ActionNote, type ActSpec, type ActionResult, type Driver, type DriverCaps, type Element, type HandName, type Key, type Observation, type WindowSurface, type WindowRef } from "../contracts";
 import { FastLane, type FastRead } from "../fastlane";
 import { cuaCall, cuaText, DriverError, errorOf, merge, toResult } from "./cli";
 import { browserRole, uiaRole } from "./roles";
@@ -17,6 +18,8 @@ export const cleanName = (s: unknown) => String(s ?? "").replace(/[\u200e\u200f\
 const byArea = (a: any, b: any) => (b.bounds?.width ?? 0) * (b.bounds?.height ?? 0) - (a.bounds?.width ?? 0) * (a.bounds?.height ?? 0) || (b.z_index ?? 0) - (a.z_index ?? 0);
 const lc = (s: unknown) => String(s ?? "").toLowerCase();
 const STATE = join(import.meta.dir, "..", "..", "runs", "agent-browser.json");
+/** desktop apps that are web pages inside (Electron, WebView2): text typed into them needs real key events */
+const WEB_APPS = /whatsapp|discord|teams|slack|spotify|vs ?code|visual studio code|notion|figma|obsidian|messenger|signal|zoom|clickup|linear/i;
 
 /** semantic_v2 snapshot -> Observation. Exported so tests run it on recorded snapshots. */
 export function browserObservation(d: any, w: WindowRef, hand: HandName, ms: number): Observation {
@@ -96,6 +99,9 @@ export class WinDriver implements Driver {
   /** windows to read with Cua next time (a fast action could not be done: Cua's tokens are needed), and fast reads that failed */
   private cuaNext = new Set<number>();
   private readMisses = new Map<number, number>();
+  /** windows found to be web pages inside (the helper or Cua said so): typed with real keys, no background try first */
+  private webViews = new Set<number>();
+  private isWeb(w: WindowRef) { return w.kind === "app" && (this.webViews.has(w.windowId) || WEB_APPS.test(w.app)); }
   /** what each app element token pointed at when it was read: lets the fast lane find the same element */
   private seen = new Map<string, { pid: number; hwnd: number; role: string; label?: string; frame?: { x: number; y: number; w: number; h: number } }>();
   onAction?: (n: ActionNote) => void;
@@ -106,7 +112,16 @@ export class WinDriver implements Driver {
     existsSync(STATE) ? Object.entries(JSON.parse(readFileSync(STATE, "utf8"))) as [HandName, number][] : []);
 
   /** every window, with invisible direction marks taken out of titles and app names */
-  private async windows(hand: HandName, args: object = {}): Promise<any[]> {
+  private async windows(hand: HandName, args: { pid?: number } = {}): Promise<any[]> {
+    // the helper lists windows in milliseconds; Cua's list costs a new process and about a second each time
+    if (this.fast.on) {
+      const r = await this.fast.windows();
+      if (r.ok && r.windows) {
+        const ws = args.pid ? r.windows.filter((w: any) => w.pid === args.pid) : r.windows;
+        for (const w of ws) { w.title = cleanName(w.title); w.app_name = cleanName(w.app_name); }
+        return ws;
+      }
+    }
     const ws: any[] = (await cuaCall("list_windows", { session: hand, ...args })).data?.windows ?? [];
     for (const w of ws) { w.title = cleanName(w.title); w.app_name = cleanName(w.app_name); }
     return ws;
@@ -197,13 +212,19 @@ export class WinDriver implements Driver {
   async rebind(hand: HandName, w: WindowRef): Promise<WindowRef | null> {
     if (w.kind !== "app") return null;
     const want = lc(w.app).replace(/\.exe$/, "").replace(/\b(windows|microsoft)\b/g, "").trim() || lc(w.app);
-    const wins: any[] = (await this.windows(hand)).filter((x: any) => x.title && x.bounds?.height > 100 && !x.minimized);
+    const all: any[] = (await this.windows(hand)).filter((x: any) => x.title && x.bounds?.height > 100);
     // the app's own process first; a title match only outside browsers (a tab titled "Spotify - Web Player" in the
     // user's Chrome is not Spotify)
     const browser = /^(chrome|msedge|firefox|brave|opera|vivaldi|iexplore)(\.exe)?$/i;
-    const pick = wins.filter(x => x.pid === w.pid).sort(byArea)[0]
+    const find = (wins: any[]) => wins.filter(x => x.pid === w.pid).sort(byArea)[0]
       ?? wins.filter(x => lc(x.app_name).replace(/\.exe$/, "").includes(want.replace(/\s+/g, ""))).sort(byArea)[0]
       ?? wins.filter(x => lc(x.title).includes(want) && (!browser.test(x.app_name ?? "") || browser.test(want))).sort(byArea)[0];
+    let pick = find(all.filter(x => !x.minimized));
+    if (!pick && this.fast.on) {
+      // minimised: shown again without taking the foreground (UI Automation can't read a minimised window's content)
+      pick = find(all.filter(x => x.minimized));
+      if (pick) { await this.fast.restore(pick.window_id).catch(() => {}); await sleep(300); }
+    }
     return pick ? { kind: "app", pid: pick.pid, windowId: pick.window_id, app: w.app, title: pick.title } : null;
   }
 
@@ -250,6 +271,11 @@ export class WinDriver implements Driver {
     let reopened = false, restored = false;
     for (let i = 0; i < 40; i++) {
       const all = (await this.windows(hand)).filter((w: any) => w.title && w.bounds?.height > 100);
+      // Notepad on Windows 11 opens a new TAB in the window that is already there: that window is it
+      if (i >= 3 && /notepad/i.test(app)) {
+        const np = all.filter((w: any) => !w.minimized && named(w)).sort(byArea)[0];
+        if (np) return { kind: "app", pid: np.pid, windowId: np.window_id, app, title: np.title };
+      }
       const wins = all.filter((w: any) => !w.minimized);
       const launched = (la.data?.windows ?? []).map((w: any) => w.window_id);
       const pick = wins.find(w => launched.includes(w.window_id))
@@ -266,8 +292,9 @@ export class WinDriver implements Driver {
         reopened = true;
         const lnk = findShortcut(app);
         if (lnk) Bun.spawn(["explorer.exe", lnk], { stdout: "ignore", stderr: "ignore" });
+        else if (/notepad/i.test(app)) Bun.spawn(["notepad.exe"], { stdout: "ignore", stderr: "ignore" });
       }
-      await sleep(400);
+      await sleep(this.fast.on ? 250 : 400);
     }
     throw new DriverError("window_lost", `'${app}' started but no window appeared (is it hidden in the tray, or on another desktop?)`);
   }
@@ -284,7 +311,8 @@ export class WinDriver implements Driver {
     // control by control in a new process each time: seconds for Discord or Spotify). Cua when it can't.
     if (this.fast.on && !this.cuaNext.has(w.windowId) && (this.readMisses.get(w.windowId) ?? 0) < 2) {
       const fr = await this.fast.read(w.windowId);
-      if (fr.ok && fr.elements?.length) {
+      // a read with hardly anything named in it (a frame around content it can't reach) counts as a miss: Cua reads it
+      if (fr.ok && (fr.elements ?? []).filter(e => (e.name ?? "").trim()).length >= 3) {
         this.readMisses.set(w.windowId, 0);
         const d = uiaWindowState(fr, w.windowId);
         for (const e of d.elements) this.seen.set(e.element_token, { pid: w.pid, hwnd: w.windowId, role: String(e.role ?? ""), label: e.label, frame: e.frame });
@@ -293,7 +321,7 @@ export class WinDriver implements Driver {
       this.readMisses.set(w.windowId, (this.readMisses.get(w.windowId) ?? 0) + 1);
       console.log(`[fast lane] read of "${w.title}" -> Cua (${fr.error ?? "no controls"})`);
     }
-    this.cuaNext.delete(w.windowId);
+    const forced = this.cuaNext.delete(w.windowId);
     // Apps built on a web view (Spotify, Teams) report hundreds of controls; without a higher cap the ones at the end
     // (Spotify's player bar with its Pause button) are cut off. perceive() still keeps at most 120 for the deciders.
     const r = await cuaCall("get_window_state", { session: hand, pid: w.pid, window_id: w.windowId, include_screenshot: false, timeout_ms: 4000, max_elements: 1000 }, 15_000);
@@ -302,6 +330,9 @@ export class WinDriver implements Driver {
     for (const e of r.data.elements ?? []) {
       if (e.element_token) this.seen.set(e.element_token, { pid: w.pid, hwnd: w.windowId, role: String(e.role ?? ""), label: e.label ?? undefined, frame: e.frame ?? undefined });
     }
+    // Cua saw nothing either: a web view (WhatsApp, Teams) builds its accessibility tree a moment after it is first
+    // asked, so the next read is the fast one again rather than Cua's from now on
+    if (!forced && !(r.data.elements ?? []).length) this.readMisses.set(w.windowId, 0);
     if (this.seen.size > 20_000) this.seen = new Map([...this.seen].slice(-5000));
     return appObservation(r.data, w, hand, r.ms);
   }
@@ -317,6 +348,7 @@ export class WinDriver implements Driver {
     const t = { pid: el.pid, hwnd: el.hwnd, frame: el.frame, role: el.role, label: el.label };
     const r = kind === "press" ? await this.fast.press(t) : await this.fast.type(t, text ?? "");
     const cli = `fastlane ${kind} ${el.role} "${el.label ?? ""}"${kind === "type" ? ` "${(text ?? "").slice(0, 40)}"` : ""}`;
+    if (!r.ok && /inside a web page/.test(r.error ?? "")) { this.webViews.add(el.hwnd); this.counts.fellBack++; return undefined; }
     if (!r.ok) {
       this.counts.fellBack++;
       const misses = (this.fastMisses.get(appKey) ?? 0) + 1;
@@ -330,16 +362,121 @@ export class WinDriver implements Driver {
     return { ok: true, route: "fast_lane", effect: r.how, ms: Math.round(r.ms), cli };
   }
 
+  /** another window of the same app than `w` (its biggest), for when `w` shows nothing (Mac version: a different
+   *  window if a read fails) */
+  async otherWindow(hand: HandName, w: WindowRef): Promise<WindowRef | null> {
+    if (w.kind !== "app") return null;
+    const want = lc(w.app).replace(/\.exe$/, "").replace(/\b(windows|microsoft)\b/g, "").trim();
+    const wins = (await this.windows(hand)).filter((x: any) => x.window_id !== w.windowId && x.title && x.bounds?.height > 100 && !x.minimized
+      && (x.pid === w.pid || lc(x.app_name).replace(/\.exe$/, "").includes(want.replace(/\s+/g, ""))));
+    const pick = wins.sort(byArea)[0];
+    return pick ? { kind: "app", pid: pick.pid, windowId: pick.window_id, app: w.app, title: pick.title } : null;
+  }
+
+  /** a picture of the window for the model (apps that show nothing to accessibility tools) */
+  async picture(w: WindowRef): Promise<{ path: string; imgW: number; imgH: number; k: number } | null> {
+    if (!this.fast.on) return null;
+    const r = await this.fast.shot(w.windowId);
+    if (r.ok && typeof r.sx === "number" && typeof r.sy === "number") this.origins.set(w.windowId, { x: r.sx, y: r.sy });
+    return r.ok && r.path && r.imgW && r.imgH && r.k ? { path: r.path, imgW: r.imgW, imgH: r.imgH, k: r.k } : null;
+  }
+
+  /** where each window's latest picture starts on the screen (window-local pixel + this = screen pixel) */
+  private origins = new Map<number, { x: number; y: number }>();
+  private onScreen(w: WindowRef, x: number, y: number) {
+    const o = this.origins.get(w.windowId);
+    return o ? { x: o.x + x, y: o.y + y } : undefined;
+  }
+
+  /** a click at a point of the window's picture (window-local pixels): Cua tries UI Automation there, then a posted
+   *  click, and the foreground when the app drops those; front = a real click with the window in front at once */
+  async clickAt(hand: HandName, w: WindowRef, x: number, y: number, opts: { front?: boolean } = {}): Promise<ActionResult> {
+    const args = { session: hand, pid: w.pid, window_id: w.windowId, x: Math.round(x), y: Math.round(y) };
+    if (opts.front) {
+      const at = this.onScreen(w, x, y);
+      const f = at ? await this.front(hand, w, { at }) : undefined;
+      return f ?? toResult(await cuaCall("click", { ...args, delivery_mode: "foreground" }));
+    }
+    return this.cuaInput(w, "click", args);
+  }
+
+  /** the field at a point of the window's picture clicked, the text typed and Enter pressed if asked (with the window
+   *  in front for a moment: a picture-only app takes no background typing) */
+  async typeAt(hand: HandName, w: WindowRef, x: number, y: number, text: string, enter = false): Promise<ActionResult> {
+    const at = this.onScreen(w, x, y);
+    const f = at ? await this.front(hand, w, { at, text, replace: true, ...(enter ? { key: "enter" as const } : {}) }) : undefined;
+    if (f) return f;
+    // Cua's own way: a click on the point gives the field focus, then the text, all in the foreground
+    const base = { session: hand, pid: w.pid, window_id: w.windowId, delivery_mode: "foreground" };
+    const typed = await cuaCall("type_text", { ...base, x: Math.round(x), y: Math.round(y), text });
+    const res = toResult(typed);
+    if (!res.ok || !enter) return res;
+    const key = await cuaCall("press_key", { ...base, key: "return" });
+    return merge([typed, key], toResult(key));
+  }
+
   /** press or type on a control from a fast read, by reference (no search) */
   private async byRef(hand: HandName, w: WindowRef, token: string, kind: "press" | "type", text?: string): Promise<ActionResult> {
     const ref = token.slice(4);
     const r = kind === "press" ? await this.fast.pressRef(ref) : await this.fast.typeRef(ref, text ?? "");
     const el = this.seen.get(token);
     const cli = `fastlane ${kind} ${el?.role ?? ""} "${el?.label ?? ""}"${kind === "type" ? ` "${(text ?? "").slice(0, 40)}"` : ""}`;
-    if (!r.ok) { this.counts.fellBack++; console.log(`[fast lane] ${cli} -> Cua (${r.error})`); return this.viaCua(w, r.error ?? "not done"); }
+    if (!r.ok) {
+      this.counts.fellBack++;
+      const why = r.error ?? "not done";
+      if (/inside a web page/.test(why)) this.webViews.add(w.windowId);
+      if (/disabled/.test(why)) return { ok: false, ms: Math.round(r.ms), cli, error: { code: "refused", hint: "the control is disabled" } };
+      // the window was read again since: the agent reads it again (fast) and picks the control anew
+      if (/stale/.test(why)) return { ok: false, ms: Math.round(r.ms), cli, error: { code: "stale", hint: why } };
+      // The app ignores the background way (a web view's field, a chat row that only opens on a click): a real click
+      // and keys with its window in front for a moment
+      const f = await this.front(hand, w, { token, ...(kind === "type" ? { text: text ?? "", replace: true } : {}) });
+      if (f) { console.log(`[fast lane] ${cli} -> foreground (${why})`); return { ...f, ms: f.ms + Math.round(r.ms) }; }
+      console.log(`[fast lane] ${cli} -> Cua (${why})`);
+      return this.viaCua(w, why);
+    }
     this.counts.fast++;
     if (el?.frame) this.onAction?.({ hand, pid: el.pid, frame: el.frame, kind, via: "fast" });
     return { ok: true, route: "fast_lane", effect: r.how, ms: Math.round(r.ms), cli };
+  }
+
+  /**
+   * The foreground fallback (through the helper, so only with the fast lane on): the window comes to the front for a
+   * moment, the control is focused and clicked (a web view's page only takes keyboard focus from a real click), keys
+   * are typed, and the user's window goes back in front. For what apps drop in the background: web views (WhatsApp,
+   * Teams), list rows that only open on a click, custom-drawn launchers. undefined = it could not be done.
+   */
+  private async front(hand: HandName, w: WindowRef, o: { token?: string; text?: string; key?: Key; replace?: boolean; at?: { x: number; y: number } }): Promise<ActionResult | undefined> {
+    if (!this.fast.on || w.kind !== "app") return undefined;
+    const el = o.token ? this.seen.get(o.token) : undefined, f = el?.frame;
+    const at = o.at ?? (f && f.w > 0 && f.h > 0 ? { x: f.x + f.w / 2, y: f.y + f.h / 2 } : undefined);
+    if (o.token && !at && !o.token.startsWith("uia:")) return undefined;
+    const uia = o.token?.startsWith("uia:");
+    const r = await this.fast.frontType({
+      hwnd: w.windowId, ref: uia ? o.token!.slice(4) : undefined,
+      target: !uia && el && f ? { pid: el.pid, hwnd: el.hwnd, frame: f, role: el.role, label: el.label } : undefined,
+      text: o.text, key: o.key, replace: o.replace, click: at,
+      // a key goes to the control as it is (a click would move the caret); clicked only if it can't be focused
+      soft: !!o.key && o.text === undefined,
+    });
+    const what = [o.text !== undefined ? `type "${o.text.slice(0, 40)}"` : "", o.key ? `key ${o.key}` : "", at ? "click" : ""].filter(Boolean).join(" + ");
+    const cli = `fastlane front ${what} ${el?.role ?? ""} "${el?.label ?? ""}"`;
+    if (!r.ok) { console.log(`[fast lane] ${cli} failed (${r.error})`); return undefined; }
+    this.counts.fast++;
+    if (el && f) this.onAction?.({ hand, pid: el.pid, frame: f, kind: o.text ? "type" : "press", via: "fast" });
+    return { ok: true, route: "foreground", effect: r.how, ms: Math.round(r.ms), cli };
+  }
+
+  /** a Cua input call; when Cua says the app drops background input (Chromium / Electron content), the same call with
+   *  delivery_mode "foreground" (Cua's own escalation: the window comes to the front for a moment, then the user's) */
+  private async cuaInput(w: WindowRef, tool: string, args: object): Promise<ActionResult> {
+    const r = await cuaCall(tool, args);
+    const res = toResult(r);
+    if (res.ok || res.error?.code !== "background_unavailable") return res;
+    if (w.kind === "app") this.webViews.add(w.windowId);
+    console.log(`[driver] ${tool}: the app drops background input -> foreground`);
+    const f = await cuaCall(tool, { ...args, delivery_mode: "foreground" });
+    return merge([r, f], toResult(f));
   }
 
   /** the next read of this window is Cua's (its tokens let Cua do what the fast lane could not); the agent reads again */
@@ -424,25 +561,49 @@ export class WinDriver implements Driver {
         const fast = await this.tryFast(hand, a.token, "press");
         if (fast) return fast;
         this.noteCua(hand, a.token, "press");
-        return toResult(await cuaCall("click", { ...base, element_token: a.token }));
+        return this.cuaInput(w, "click", { ...base, element_token: a.token });
       }
       case "type": {
         // The fast lane and set_value replace the content through the UIA ValuePattern; type_text inserts characters.
         if (a.token.startsWith("uia:")) return this.byRef(hand, w, a.token, "type", a.text);
-        const fast = await this.tryFast(hand, a.token, "type", a.text);
+        // A web page inside an app (WhatsApp, Discord): a value set in the background may never reach the page (it
+        // listens for key events), so it is typed for real with the window in front for a moment
+        if (this.isWeb(w)) {
+          const f = await this.front(hand, w, { token: a.token, text: a.text, replace: true });
+          if (f) return f;
+        }
+        const fast = this.isWeb(w) ? undefined : await this.tryFast(hand, a.token, "type", a.text);
         if (fast) return fast;
         this.noteCua(hand, a.token, "type");
         const set = await cuaCall("set_value", { ...base, element_token: a.token, value: a.text });
         const res = toResult(set);
         if (res.ok) return res;
+        const f = await this.front(hand, w, { token: a.token, text: a.text, replace: true });
+        if (f) return { ...f, ms: f.ms + set.ms, cli: `${set.cli} ; ${f.cli}` };
         const typed = await cuaCall("type_text", { ...base, element_token: a.token, text: a.text });
-        return merge([set, typed], toResult(typed));
+        const tr = toResult(typed);
+        if (tr.ok || tr.error?.code !== "background_unavailable") return merge([set, typed], tr);
+        const fg = await cuaCall("type_text", { ...base, element_token: a.token, text: a.text, delivery_mode: "foreground" });
+        return merge([set, typed, fg], toResult(fg));
       }
       case "key": {
-        // a key goes to a control Cua knows: read the window with Cua for this step
-        if (a.token?.startsWith("uia:")) return this.viaCua(w, "keys go through Cua");
+        // A control from a fast read has no Cua token: the helper presses the key with the window in front for a moment
+        if (a.token?.startsWith("uia:")) return (await this.front(hand, w, { token: a.token, key: a.key })) ?? this.viaCua(w, "the key could not be pressed");
+        // Cua posts it in the background; a web page inside an app drops that, so it gets the key with its window in front
+        if (this.isWeb(w)) {
+          const f = await this.front(hand, w, { token: a.token, key: a.key });
+          if (f) return f;
+        }
         const key = { enter: "return", tab: "tab", escape: "escape", backspace: "delete", pagedown: "pagedown", pageup: "pageup" }[a.key];
-        return toResult(await cuaCall("press_key", { ...base, key, ...(a.token ? { element_token: a.token } : {}) }));
+        const args = { ...base, key, ...(a.token ? { element_token: a.token } : {}) };
+        const r = await cuaCall("press_key", args);
+        const res = toResult(r);
+        if (res.ok || res.error?.code !== "background_unavailable") return res;
+        this.webViews.add(w.windowId);
+        const f = await this.front(hand, w, { token: a.token, key: a.key });
+        if (f) return { ...f, ms: f.ms + r.ms, cli: `${r.cli} ; ${f.cli}` };
+        const fg = await cuaCall("press_key", { ...args, delivery_mode: "foreground" });
+        return merge([r, fg], toResult(fg));
       }
       case "scroll": return toResult(await cuaCall("scroll", { ...base, direction: a.direction, amount: 5 }));
       case "navigate": return unsupported("navigate in a desktop app");

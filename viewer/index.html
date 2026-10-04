@@ -312,6 +312,13 @@ function onLog(l) {
 
 function onVoice(v) {
   const dot = $("vdot"), t = $("vin");
+  // what was heard (after fixing names it misheard), so a mishearing is seen at once
+  if (v.event === "transcript" && v.text) {
+    const fixed = (v.fixed || []).map((f) => `${esc(f[0])} → ${esc(f[1])}`).join(", ");
+    const unsure = (v.unsure || []).map(esc).join(", ");
+    line(`heard “${esc(v.text)}”${fixed ? ` · fixed ${fixed}` : ""}${unsure ? ` · not sure about: ${unsure}` : ""}`, "#8a8f98", unsure ? "warn" : "",
+      `<span>voice</span><span>${v.ms} ms</span>`);
+  }
   if (v.event === "down") { dot.className = "dot live"; t.textContent = "listening… point at what you mean"; }
   else if (v.event === "up") { dot.className = "dot busy"; t.textContent = "transcribing…"; }
   else { dot.className = "dot"; t.textContent = S ? S.voice.replace(/;.*$/, "") : "voice"; }

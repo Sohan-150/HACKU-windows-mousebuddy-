@@ -20,7 +20,7 @@
 # Protocol: JSON lines on stdin from the server, JSON lines on stdout to it. Coordinates are physical screen pixels, the
 # same space as Cua's window bounds and element frames. Exits when stdin closes.
 #   in:  hello {key} | capture {id} | listening | status {text} | idle | typebox | clear | error {text}
-#        answer {seq, say, shapes[], step?, fadeMs, audio: "follows"|"system"} | audio {seq, part, path} | speak {seq, part, say}
+#        answer {seq, say, show?, shapes[], step?, fadeMs, audio: "follows"|"system"} | audio {seq, part, path} | speak {seq, part, say}
 #        agents {running, tasks[{id, name, colour, app, goal, status, now, answer, reason, seconds, windowId, pid}]}
 #        tap {colour, x, y, w, h, pid}
 #   out: ready | captured {id, path, imgW, imgH, x, y, w, h, cx, cy} | ask {text, cursor} | step {go} | dismiss | stop | key {what} | quit
@@ -266,8 +266,11 @@ public class Canvas : Layered {
             float w = size.Width + Look.P(18), h = size.Height + Look.P(10);
             RectangleF r = right ? new RectangleF(p.X + Look.P(10), p.Y - h / 2, w, h)
                 : new RectangleF(below ? p.X - size.Width / 2 - Look.P(9) : p.X + Look.P(10), below ? p.Y + Look.P(8) : p.Y - size.Height - Look.P(20), w, h);
-            r.X = Math.Min(Math.Max(r.X, area.X + 4), area.Right - r.Width - 4);
-            r.Y = Math.Min(Math.Max(r.Y, area.Y + 4), area.Bottom - r.Height - 4);
+            // inside the drawing and on the monitor it is on (off the taskbar): never cut off at a screen edge
+            var mon = Rectangle.Intersect(area, Screen.FromPoint(Point.Round(p)).WorkingArea);
+            if (mon.Width < r.Width + 8 || mon.Height < r.Height + 8) mon = area;
+            r.X = Math.Min(Math.Max(r.X, mon.X + 4), mon.Right - r.Width - 4);
+            r.Y = Math.Min(Math.Max(r.Y, mon.Y + 4), mon.Bottom - r.Height - 4);
             using (var path = Look.Round(r, Look.P(8)))
             using (var fill = new SolidBrush(Look.A(Look.INK, 0.94 * alpha)))
             using (var pen = new Pen(Look.A(Look.MINT, alpha), Look.P(1.5f))) { g.FillPath(fill, path); g.DrawPath(pen, path); }
@@ -420,6 +423,10 @@ public class Dock : Layered {
     public bool ShowPreviews = true;
     DateTime? hideAt;
     bool down, moved; Point downCursor, downAt; Point? placed;
+    // widgets closed with their x: hidden here only (the agent keeps working; the panel still shows it)
+    readonly HashSet<string> dismissed = new HashSet<string>();
+    readonly List<RectangleF> closeBoxes = new List<RectangleF>();
+    int hover = -1; byte lastOpacity = 255;
     const int W = 300, TEXT_H = 70, GAP = 8;
     int columns = 1, thumbH;
     public Dock() { clickThrough = false; }
@@ -428,8 +435,14 @@ public class Dock : Layered {
         var old = new Dictionary<string, Card>();
         foreach (var c in Cards) old[c.Id] = c;
         var cards = new List<Card>();
+        var incoming = new HashSet<string>();
+        bool known = false;
         foreach (var o in J.L(m, "tasks")) {
             var d = o as Dictionary<string, object>; if (d == null) continue;
+            string cid = J.S(d, "id");
+            incoming.Add(cid);
+            if (old.ContainsKey(cid) || dismissed.Contains(cid)) known = true;
+            if (dismissed.Contains(cid)) continue;
             var c = new Card();
             c.Id = J.S(d, "id"); c.Name = J.S(d, "name"); if (c.Name == "") c.Name = "Agent";
             c.App = J.S(d, "app"); c.Goal = J.S(d, "goal"); c.Status = J.S(d, "status"); if (c.Status == "") c.Status = "queued";
@@ -440,7 +453,8 @@ public class Dock : Layered {
             c.StartedAt = prev != null && prev.StartedAt.HasValue ? prev.StartedAt : (c.Status == "running" ? (DateTime?)DateTime.Now.AddSeconds(-c.Seconds) : null);
             cards.Add(c);
         }
-        if (cards.Count == 0 || !cards.Exists(c => old.ContainsKey(c.Id))) Previews.Reset();   // a new set of agents
+        if (cards.Count == 0 || !known) Previews.Reset();   // a new set of agents
+        dismissed.IntersectWith(incoming);
         Cards = cards;
         if (Cards.Count == 0) { Hide(); return; }
         hideAt = running ? (DateTime?)null : DateTime.Now.AddSeconds(20);       // results stay readable, then the widgets go
@@ -469,8 +483,10 @@ public class Dock : Layered {
         if (thumbH > 0) Previews.Refresh(Cards, Look.P(W - 20));
         Render(opacity);
     }
-    void Render() { Render(255); }
+    void Render() { Render(lastOpacity); }
     void Render(byte opacity) {
+        lastOpacity = opacity;
+        closeBoxes.Clear();
         int w = Look.P(W), textH = Look.P(TEXT_H), gap = Look.P(GAP);
         int cardH = textH + (thumbH > 0 ? thumbH + Look.P(8) : 0);
         int rows = (Cards.Count + columns - 1) / columns;
@@ -500,12 +516,23 @@ public class Dock : Layered {
                 using (var white = new SolidBrush(Color.White)) using (var dim = new SolidBrush(Color.FromArgb(140, 255, 255, 255))) {
                     g.DrawString(c.Name, bold, white, r.X + Look.P(30), r.Y + Look.P(8));
                     float nameW = g.MeasureString(c.Name, bold).Width;
-                    g.DrawString("  \u00b7  " + c.App, small, dim, new RectangleF(r.X + Look.P(30) + nameW, r.Y + Look.P(10), w - Look.P(130) - nameW, Look.P(16)), trim);
+                    g.DrawString("  \u00b7  " + c.App, small, dim, new RectangleF(r.X + Look.P(30) + nameW, r.Y + Look.P(10), w - Look.P(152) - nameW, Look.P(16)), trim);
                     double secs = running ? (c.StartedAt.HasValue ? (DateTime.Now - c.StartedAt.Value).TotalSeconds : c.Seconds) : c.Seconds;
                     string badge = running ? string.Format("{0:0} s", secs) : c.Status == "done" ? string.Format("\u2713  {0:0.0} s", secs) : c.Status == "failed" ? "\u2715  stopped" : "waiting";
                     var badgeColour = c.Status == "done" ? Look.MINT : c.Status == "failed" ? Look.CORAL : Color.FromArgb(140, 255, 255, 255);
                     float bw = g.MeasureString(badge, mono).Width;
-                    using (var bb = new SolidBrush(badgeColour)) g.DrawString(badge, mono, bb, r.Right - Look.P(14) - bw, r.Y + Look.P(9));
+                    using (var bb = new SolidBrush(badgeColour)) g.DrawString(badge, mono, bb, r.Right - Look.P(36) - bw, r.Y + Look.P(9));
+                    // the x: closes this widget only (the agent keeps working)
+                    float xs = Look.P(18);
+                    var xbox = new RectangleF(r.Right - Look.P(9) - xs, r.Y + Look.P(8), xs, xs);
+                    closeBoxes.Add(xbox);
+                    if (hover == i) using (var hb = new SolidBrush(Color.FromArgb(60, 255, 255, 255))) g.FillEllipse(hb, xbox);
+                    float xi = Look.P(5);
+                    using (var xp = new Pen(Color.FromArgb(hover == i ? 255 : 150, 255, 255, 255), Look.P(1.6f))) {
+                        xp.StartCap = LineCap.Round; xp.EndCap = LineCap.Round;
+                        g.DrawLine(xp, xbox.X + xi, xbox.Y + xi, xbox.Right - xi, xbox.Bottom - xi);
+                        g.DrawLine(xp, xbox.Right - xi, xbox.Y + xi, xbox.X + xi, xbox.Bottom - xi);
+                    }
                     g.DrawString(c.Goal, small, dim, new RectangleF(r.X + Look.P(14), r.Y + Look.P(30), w - Look.P(28), Look.P(17)), trim);
                     string now = c.Status == "done" ? (c.Answer == "" ? "Done" : "\u2192 " + c.Answer)
                         : c.Status == "failed" ? (c.Reason == "" ? "Couldn't finish" : c.Reason)
@@ -549,14 +576,37 @@ public class Dock : Layered {
             Present(b, x, y, opacity);
         }
     }
+    int CloseAt(Point p) {
+        for (int i = 0; i < closeBoxes.Count; i++) if (RectangleF.Inflate(closeBoxes[i], Look.P(4), Look.P(4)).Contains(p)) return i;
+        return -1;
+    }
+    /** closes one widget (its x): the agent keeps working, and the panel still shows it */
+    void Dismiss(int i) {
+        if (i < 0 || i >= Cards.Count) return;
+        dismissed.Add(Cards[i].Id);
+        Cards.RemoveAt(i);
+        hover = -1; Cursor = Cursors.Default;
+        if (Cards.Count == 0) { Hide(); return; }
+        Arrange(); Render();
+    }
     protected override void OnMouseDown(MouseEventArgs e) { if (e.Button != MouseButtons.Left) return; down = true; moved = false; downCursor = Cursor.Position; downAt = new Point(X0, Y0); Capture = true; }
     protected override void OnMouseMove(MouseEventArgs e) {
-        if (!down) return;
+        if (!down) {
+            int h = CloseAt(e.Location);
+            if (h != hover) { hover = h; Cursor = h >= 0 ? Cursors.Hand : Cursors.Default; Render(); }
+            return;
+        }
         var p = Cursor.Position; int dx = p.X - downCursor.X, dy = p.Y - downCursor.Y;
         if (!moved && Math.Abs(dx) + Math.Abs(dy) < 5) return;
         moved = true; X0 = downAt.X + dx; Y0 = downAt.Y + dy; Render();
     }
-    protected override void OnMouseUp(MouseEventArgs e) { if (!down) return; down = false; Capture = false; if (moved) placed = new Point(X0, Y0); }
+    protected override void OnMouseUp(MouseEventArgs e) {
+        if (!down) return;
+        down = false; Capture = false;
+        if (moved) placed = new Point(X0, Y0);
+        else Dismiss(CloseAt(e.Location));
+    }
+    protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); if (hover >= 0) { hover = -1; Cursor = Cursors.Default; Render(); } }
 }
 
 /** the buddy next to the cursor: listening / thinking / the answer; flies to what it explains */
@@ -580,31 +630,50 @@ public class Buddy : Layered {
         } else pos = follow;
         Render();
     }
+    /** where the answer bubble goes on the screen (dot centre p, bubble size bw x bh): right of the dot, or left of it
+     *  near the right edge, and moved in from any edge (and off the taskbar) so none of it is cut off */
+    public static RectangleF BubbleAt(PointF p, float bw, float bh, Rectangle wa, float gap, float margin) {
+        float bx = p.X + gap, by = p.Y - gap * 0.7f;
+        if (bx + bw > wa.Right - margin) bx = p.X - gap - bw;                     // no room on the right: the left side
+        bx = Math.Max(wa.Left + margin, Math.Min(bx, wa.Right - margin - bw));
+        by = Math.Max(wa.Top + margin, Math.Min(by, wa.Bottom - margin - bh));
+        return new RectangleF(bx, by, bw, bh);
+    }
     void Render() {
         double t = (DateTime.Now - DateTime.Today).TotalSeconds;
         string shown = Showing;
+        var wa = Screen.FromPoint(Point.Round(pos)).WorkingArea;
         using (var font = Look.Font(13.5f, FontStyle.Regular)) {
             SizeF ts = SizeF.Empty;
-            using (var probe = new Bitmap(1, 1)) using (var pg = Graphics.FromImage(probe)) if (shown != "") ts = pg.MeasureString(shown, font, Look.P(300));
+            using (var probe = new Bitmap(1, 1)) using (var pg = Graphics.FromImage(probe)) if (shown != "") {
+                ts = pg.MeasureString(shown, font, Look.P(300));
+                // a long answer on a short screen: wider rather than taller than the screen
+                if (ts.Height > wa.Height * 0.6) ts = pg.MeasureString(shown, font, Math.Max(Look.P(300), Math.Min(Look.P(640), wa.Width - Look.P(60))));
+            }
             float bw = shown == "" ? 0 : ts.Width + Look.P(22), bh = shown == "" ? 0 : ts.Height + Look.P(14);
-            int w = (int)Math.Max(Look.P(30), Look.P(30) + bw + Look.P(4)), h = (int)Math.Max(Look.P(30), bh + Look.P(10));
-            using (var b = new Bitmap(w, h, PixelFormat.Format32bppArgb))
+            // the picture covers the dot (with its glow) and the bubble, wherever the bubble had to go
+            var dotArea = new RectangleF(pos.X - Look.P(15), pos.Y - Look.P(15), Look.P(30), Look.P(30));
+            var bubble = shown == "" ? RectangleF.Empty : BubbleAt(pos, bw, bh, wa, Look.P(14), Look.P(8));
+            var all = shown == "" ? dotArea : RectangleF.Union(dotArea, RectangleF.Inflate(bubble, 2, 2));
+            int ox = (int)Math.Floor(all.X), oy = (int)Math.Floor(all.Y);
+            int w = (int)Math.Ceiling(all.Right) - ox, h = (int)Math.Ceiling(all.Bottom) - oy;
+            using (var b = new Bitmap(Math.Max(2, w), Math.Max(2, h), PixelFormat.Format32bppArgb))
             using (var g = Look.Begin(b)) {
                 double pulse = State == "listening" ? 1 + 0.25 * Math.Sin(t * 8) : 1;
                 var colour = State == "listening" || State == "error" ? Look.CORAL : Look.MINT;
                 float d = (float)(Look.P(12) * pulse);
-                var dot = new RectangleF(Look.P(14) - d / 2, Look.P(14) - d / 2, d, d);
+                var dot = new RectangleF(pos.X - ox - d / 2, pos.Y - oy - d / 2, d, d);
                 using (var glow = new SolidBrush(Color.FromArgb(60, colour))) g.FillEllipse(glow, RectangleF.Inflate(dot, Look.P(4), Look.P(4)));
                 using (var fill = new SolidBrush(Look.A(colour, State == "idle" ? 0.75 : 1))) g.FillEllipse(fill, dot);
                 using (var ring = new Pen(Color.FromArgb(230, 255, 255, 255), Look.P(1.5f))) g.DrawEllipse(ring, dot);
                 if (shown != "") {
-                    var r = new RectangleF(Look.P(28), Look.P(4), bw, bh);
+                    var r = new RectangleF(bubble.X - ox, bubble.Y - oy, bw, bh);
                     using (var path = Look.Round(r, Look.P(10)))
                     using (var fill = new SolidBrush(Look.INK)) using (var pen = new Pen(Look.A(colour, 0.9), Look.P(1.2f))) { g.FillPath(fill, path); g.DrawPath(pen, path); }
                     using (var white = new SolidBrush(Color.White)) g.DrawString(shown, font, white, new RectangleF(r.X + Look.P(11), r.Y + Look.P(7), ts.Width + 2, ts.Height + 2));
                 }
                 // the dot's centre sits on the target point
-                Present(b, (int)(pos.X - Look.P(14)), (int)(pos.Y - Look.P(14)), 255);
+                Present(b, ox, oy, 255);
             }
         }
     }
@@ -918,7 +987,8 @@ public static class Overlay {
             string say = J.S(m, "say");
             var shapes = new List<Shape>();
             foreach (var o in J.L(m, "shapes")) { var s = Shape.Of(o as Dictionary<string, object>); if (s != null) shapes.Add(s); }
-            string text = say;
+            string text = J.S(m, "show");   // shown (when it differs from what is said: the words that were heard)
+            if (text == "") text = say;
             lessonOn = false;
             var st = J.O(m, "step");
             if (st != null) {

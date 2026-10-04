@@ -29,7 +29,7 @@ console.log(`deciders: ${jev ? `TypeSafe ${JEV_MODEL} first` : "no jev"}${claude
 // The overlay (buddy, drawings, agents' widgets, typing box, voice) takes ~1 s to start: start it now.
 onOverlay(e => app.onOverlay(e));
 warmOverlay({ key: keyLabel(process.env.PTT_KEY ?? "ctrl_win") });
-const voice = startVoice(e => app.onVoice(e));
+const voice = startVoice(e => app.onVoice(e), { vocab: app.vocabPath() });
 app.voiceInfo = voice?.description ?? "voice off (type instead)";
 console.log(`overlay: ${overlayOn() ? "on" : "off"} · answers spoken with ${app.explainer.voice.name}`);
 app.pushState();

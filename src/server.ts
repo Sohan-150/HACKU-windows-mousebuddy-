@@ -12,11 +12,13 @@
 // in use waits its turn (its widget says what it is waiting for).
 // Questions about the screen typed in the panel are answered from the window behind the panel.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { newTask, runTask, type ClaudeLike, type JevLike } from "./agent";
 import type { Claude, Turn } from "./claude";
 import { AGENT_COLOURS, type AgentState, type ApprovalRequest, type Driver, type FileAction, type HandName, type LogLine, type Task } from "./contracts";
 import { behindPanel, Explainer, lessonWord, type Capture, type ExplainResult, type OverlaySend } from "./explain";
+import { correctHeard, needsConfirm, Vocabulary, vocabFile, type Corrected, type Heard } from "./heard";
 import type { VoiceEvent } from "./intake";
 import { undoMoves } from "./files";
 import { JEV_USD_PER_INPUT_TOKEN } from "./jev";
@@ -40,8 +42,15 @@ type AppEvent =
   | { type: "status"; text: string; taskId?: string }
   | LogLine;
 
-/** for tests: no overlay, no Cua (a fake picture of the screen), no network voice */
-export interface AppOptions { send?: OverlaySend; capture?: (cursor?: Point) => Promise<Capture>; behindPanel?: () => Promise<Capture>; voice?: Voice }
+/** for tests: no overlay, no Cua (a fake picture of the screen), no network voice, a vocabulary in a temp file */
+export interface AppOptions { send?: OverlaySend; capture?: (cursor?: Point) => Promise<Capture>; behindPanel?: () => Promise<Capture>; voice?: Voice; vocab?: Vocabulary }
+/** what the speech model made of the words, how sure it was, and what was corrected */
+export interface HeardInfo { c: Corrected; h: Heard }
+// a whole reply that means yes ("yes", "yeah do it", "that's right") — not a new command that starts with "go"
+const RIGHT = /^(yes|yeah|yep|yup|right|correct|that's right|thats right|exactly|do it|go ahead|ok(ay)?|sure)([,.!]?\s+(please|do it|go ahead|that's right|thats right|correct|it is|exactly|thanks|thank you))*[.!]?$/i;
+// "no", or "no, play Drake" (the rest is the command said right)
+const WRONG = /^(no|nope|nah|wrong|not quite)\b[\s,.!]*(i said\s+|it's\s+|its\s+|it was\s+)?/i;
+const HEARD_MS = 60_000;                      // how long a "did you say...?" waits for its yes
 
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 const POINTER_HAND: HandName = "Blue-9";      // its own Cua session for reading windows, so asks never disturb a running task
@@ -67,6 +76,8 @@ export class App {
   voiceMode: "run" | "draft" = process.env.VOICE_MODE === "draft" ? "draft" : "run";
   agents = new Map<string, AgentState & { endedAt?: number }>();   // each part of each task: its widget
   readonly explainer: Explainer;
+  readonly vocab: Vocabulary;          // the names this user says (src/heard.ts)
+  heard?: { text: string; at: number };   // a job heard unsurely, waiting for "yes" (or to be said again)
   private send: OverlaySend;
   private behind: () => Promise<Capture>;
   private listenTimer?: Timer;
@@ -78,6 +89,8 @@ export class App {
 
   constructor(public driver: Driver, public claude: AppClaude | null, public jev: AppJev | null, public hand: HandName = "Mint-3", opts: AppOptions = {}) {
     this.send = opts.send ?? overlaySend;
+    // (under bun test: a throwaway file, so test names never become the user's own words)
+    this.vocab = opts.vocab ?? new Vocabulary(process.env.NODE_ENV === "test" ? join(tmpdir(), `backstage-vocab-${process.pid}.json`) : undefined);
     const explainClaude = claude?.explain ? claude as Pick<Claude, "explain" | "usage"> : null;
     this.explainer = new Explainer({
       claude: explainClaude, jev, send: this.send, speak, hand: POINTER_HAND, voice: opts.voice, capture: opts.capture,
@@ -89,6 +102,8 @@ export class App {
   }
 
   get desktop(): boolean { return this.driver.caps.platform !== "sim"; }
+  /** the vocabulary file voice.py reads */
+  vocabPath(): string { return vocabFile(this.vocab); }
 
   snapshot() {
     return {
@@ -114,7 +129,12 @@ export class App {
   // the talk keys (voice.py) and the overlay
 
   onVoice(v: VoiceEvent) {
-    this.emit({ type: "voice", voice: v });
+    // a transcript: words the model was unsure of that sound like a known name are corrected first
+    const fix = v.event === "transcript" ? correctHeard(v.text.trim(), v.words, this.vocab.terms()) : undefined;
+    if (v.event === "transcript" && fix) {
+      if (fix.fixed.length) console.log(`[voice] heard "${v.text.trim()}" -> "${fix.text}" (${fix.fixed.map(([a, b]) => `${a} -> ${b}`).join(", ")})`);
+      this.emit({ type: "voice", voice: { ...v, text: fix.text, heard: v.text, fixed: fix.fixed, unsure: fix.unsure } as VoiceEvent });
+    } else this.emit({ type: "voice", voice: v });
     if (v.event === "down") {
       stopSpeaking();
       // Capture now, as the user sees the screen (the overlay's own windows are never in the picture).
@@ -132,11 +152,12 @@ export class App {
       if (v.reason === "tap") this.send({ cmd: "typebox" });
       else { this.explainer.discard(); this.send({ cmd: "idle" }); }
     } else if (v.event === "transcript") {
-      const said = v.text.trim();
+      const said = fix!.text;
       // "thank you", "okay": also what the speech model makes of silence; kept only when it means something now
-      const meant = !v.maybe_noise || (this.explainer.inLesson && !!lessonWord(said)) || (this.approvals.size > 0 && (YES.test(said) || NO.test(said)));
+      const meant = !v.maybe_noise || (this.explainer.inLesson && !!lessonWord(said)) || (this.approvals.size > 0 && (YES.test(said) || NO.test(said)))
+        || (!!this.heard && RIGHT.test(said));
       if (!meant) { this.explainer.discard(); this.send({ cmd: "error", text: "didn't catch that: hold the keys and speak a little louder" }); }
-      else if (said) void this.onSpoken(said);
+      else if (said) void this.onSpoken(said, { c: fix!, h: { logprob: v.logprob, noSpeech: v.no_speech, words: v.words } });
       else { this.explainer.discard(); this.send({ cmd: "idle" }); }
     } else if (v.event === "error") {
       this.notice("warn", `voice: ${v.msg}`);
@@ -154,13 +175,28 @@ export class App {
     else if (e.event === "ready") this.dock();
   }
 
-  /** One spoken utterance (the talk keys). */
-  onSpoken(text: string): Promise<void> { return this.hotkey(text, "voice"); }
+  /** One spoken utterance (the talk keys), with how sure the speech model was when it says. */
+  onSpoken(text: string, heard?: HeardInfo): Promise<void> { return this.hotkey(text, "voice", undefined, heard); }
 
   /** The talk keys' words (spoken, or typed in the overlay's box): a job for the agents, or a question for explain mode. */
-  async hotkey(text: string, source: Task["source"], cursor?: Point): Promise<void> {
+  async hotkey(text: string, source: Task["source"], cursor?: Point, heard?: HeardInfo): Promise<void> {
     const q = text.trim();
     const pending = [...this.approvals.values()];
+    // "Did you say ...?": yes runs it; no (alone) drops it; anything else is a new command (said again)
+    const asked = this.heard && Date.now() - this.heard.at < HEARD_MS ? this.heard : undefined;
+    if (asked && q && !pending.length) {
+      this.heard = undefined;
+      // (routed as if said with no doubt: a job and a "show me how" in it still go their own ways)
+      if (RIGHT.test(q)) return this.hotkey(asked.text, source, cursor);
+      const wrong = WRONG.exec(q);
+      if (wrong) {
+        const rest = q.slice(wrong[0].length).trim();
+        if (rest) return this.hotkey(rest, source, cursor, heard);
+        this.explainer.discard();
+        this.explainer.say("Okay. Hold the keys and say it again, or fix it in the panel's box.", 5000);
+        return;
+      }
+    }
     if (q && pending.length && (YES.test(q) || NO.test(q))) {
       // The oldest question first (several tasks can be waiting for an okay).
       this.explainer.discard();
@@ -178,6 +214,7 @@ export class App {
       const teach = parts.filter(p => codeRoute(p, ctx) === "explain" && !this.explainer.inCode(p));
       const jobs = parts.filter(p => !teach.includes(p));
       if (teach.length && jobs.length) {
+        if (heard && needsConfirm(heard.c, heard.h)) { this.confirm(q, heard); return; }
         this.explainer.discard();
         const t = this.addTask(jobs.join(". "), source);
         this.fromHotkey.add(t.id);
@@ -210,11 +247,31 @@ export class App {
       this.explainer.say(`"${clip(q, 80)}" is in the box on the panel: press Run to do it.`, 6000);
       return;
     }
+    // a job heard with words the speech model was unsure of: said back first, never done on a guess
+    if (heard && needsConfirm(heard.c, heard.h)) { this.confirm(q, heard); return; }
+    this.run(q, source, source === "voice");
+  }
+
+  /** a job from the talk keys: "On it" (showing the words heard, so a mishearing is seen at once), then the agents */
+  private run(q: string, source: Task["source"], showHeard: boolean) {
+    this.explainer.discard();
     if (!this.jev && !this.claude) {
       this.explainer.say("No TypeSafe or Claude API key in the .env file, so the agents can't start.", 6000);
-    } else this.explainer.say("On it.", 3000);
+    } else this.explainer.say("On it.", 3000, showHeard ? `On it: \u201c${clip(q, 90)}\u201d` : undefined);
     const t = this.addTask(q, source);
     this.fromHotkey.add(t.id);
+  }
+
+  /** "Did you say ...?": shown and said back; the words wait for a yes (and are in the panel's box to fix by typing) */
+  private confirm(q: string, heard: HeardInfo) {
+    this.explainer.discard();
+    this.heard = { text: q, at: Date.now() };
+    this.draft = q;
+    this.pushState();
+    const unsure = heard.c.unsure.length ? ` (not sure about \u201c${heard.c.unsure.slice(0, 3).join("\u201d, \u201c")}\u201d)` : "";
+    console.log(`[voice] confirm before doing: "${q}"${unsure}`);
+    this.explainer.say(`I heard: ${q}. Is that right?`, HEARD_MS,
+      `Did you say \u201c${clip(q, 120)}\u201d?${unsure}\nHold the keys and say yes, or say it again.`);
   }
 
   // ---------------------------------------------------------------------------------------------------------------
@@ -261,6 +318,7 @@ export class App {
   // tasks
 
   add(instruction: string, source: Task["source"]): Task {
+    this.heard = undefined;   // sent from the panel's box (perhaps fixed by typing): no "yes" is waited for any more
     // A screen question typed in the panel ("what am I looking at?", "circle the zebra") is answered from the window
     // behind the panel, not planned as a task. (Typed how-to questions stay with the planner: "how do I renew my
     // passport" needs no screenshot.)
@@ -314,6 +372,8 @@ export class App {
       });
       upd(done);
       if ((done.status === "done" || done.status === "partial") && done.result) this.turns.push({ instruction: done.instruction, answer: done.result.answer });
+      // the apps, people and artists of a job that went well: names the speech model gets as a hint from now on
+      this.vocab.learnFrom(done);
     } catch (e) {
       done = { ...next, status: "failed", exception: { code: "model_error", reason: (e as Error).message } };
       upd(done);

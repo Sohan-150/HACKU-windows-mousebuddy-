@@ -10,7 +10,9 @@ export type VoiceEvent =
   | { event: "down"; t: number }
   | { event: "up"; t: number; ms: number }
   | { event: "cancel"; reason: string }                                  // Ctrl was part of a shortcut, or only tapped
-  | { event: "transcript"; lang: string; text: string; ms: number; audio_ms?: number; maybe_noise?: boolean }   // maybe_noise: also what silence turns into ("thank you")
+  // maybe_noise: also what silence turns into ("thank you"); logprob, no_speech and each word's probability (Windows)
+  // say how sure the speech model was
+  | { event: "transcript"; lang: string; text: string; ms: number; audio_ms?: number; maybe_noise?: boolean; logprob?: number; no_speech?: number; words?: [string, number][] }
   | { event: "error"; msg: string };
 
 const ROOT = join(import.meta.dir, "..", "..");
@@ -34,19 +36,22 @@ function parseLine(l: string): VoiceEvent | null {
 
 export interface VoiceHandle { stop(): void; description: string }
 
-export function startVoice(onEvent: (e: VoiceEvent) => void): VoiceHandle | null {
+/** opts.vocab: the file of names this user says (src/heard.ts), for the speech model's hint */
+export function startVoice(onEvent: (e: VoiceEvent) => void, opts: { vocab?: string } = {}): VoiceHandle | null {
   if (process.env.VOICE === "off") return null;
-  if (process.platform === "win32") return startWindows(onEvent);
+  if (process.platform === "win32") return startWindows(onEvent, opts.vocab);
   if (process.platform === "darwin") return startMac(onEvent);
   return null;
 }
 
-function startWindows(onEvent: (e: VoiceEvent) => void): VoiceHandle | null {
+function startWindows(onEvent: (e: VoiceEvent) => void, vocab?: string): VoiceHandle | null {
   const py = join(ROOT, "native", "win", ".venv", "Scripts", "python.exe");
   if (!existsSync(py)) { onEvent({ event: "error", msg: "voice not installed: see README (native/win setup); typed box still works" }); return null; }
-  const model = process.env.WHISPER_MODEL ?? "small", key = process.env.PTT_KEY ?? "ctrl_win", lang = process.env.VOICE_LANG ?? "en";
+  const key = process.env.PTT_KEY ?? "ctrl_win", lang = process.env.VOICE_LANG ?? "en";
+  // English-only small model for English: fewer mishearings than the multilingual one at the same speed
+  const model = process.env.WHISPER_MODEL ?? (lang === "en" ? "small.en" : "small");
   const proc = Bun.spawn([py, join(ROOT, "native", "win", "voice.py"), "--model", model, "--key", key, "--lang", lang],
-    { stdout: "pipe", stderr: "ignore", stdin: "ignore", env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
+    { stdout: "pipe", stderr: "ignore", stdin: "ignore", env: { ...process.env, PYTHONIOENCODING: "utf-8", ...(vocab ? { VOICE_VOCAB: vocab } : {}) } });
   readLines(proc.stdout, l => { const e = parseLine(l); if (e) onEvent(e); });
   proc.exited.then(code => onEvent({ event: "error", msg: `voice helper exited (${code}); typed box still works` }));
   return { stop: () => proc.kill(), description: `hold ${keyLabel(key)} and talk; point the mouse at something to ask about it (on-device speech, ${lang === "auto" ? "any language" : lang})` };

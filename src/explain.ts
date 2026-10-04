@@ -141,7 +141,7 @@ export class Explainer {
   }
 
   /** say something with no drawing (the agents' "On it." and their results); it stays on screen for `fadeMs` */
-  say(text: string, fadeMs = 7000) { this.answer(text, [], fadeMs); }
+  say(text: string, fadeMs = 7000, show?: string) { this.answer(text, [], fadeMs, undefined, show); }
 
   /** status on the buddy ("looking at your screen…") */
   status(text: string) { this.deps.send({ cmd: "status", text }); }
@@ -251,12 +251,13 @@ export class Explainer {
   }
 
   /** draw now; the voice follows part by part as soon as each part's audio is ready (cached for repeat/back) */
-  private answer(say: string | string[], shapes: Shape[], fadeMs: number, step?: { index: number; total: number }) {
+  /** `show`: what the buddy shows when it differs from what is said ("On it: “play Drake on Spotify”" / "On it.") */
+  private answer(say: string | string[], shapes: Shape[], fadeMs: number, step?: { index: number; total: number }, show?: string) {
     const seq = ++this.seq;
     const lines = typeof say === "string" ? [say] : say;
     const text = lines.join(" ");
     const voiceOn = this.voice.on;
-    if (!this.deps.send({ cmd: "answer", seq, say: text, shapes, ...(step ? { step } : {}), fadeMs, audio: voiceOn ? "follows" : "system" })) {
+    if (!this.deps.send({ cmd: "answer", seq, say: text, ...(show ? { show } : {}), shapes, ...(step ? { step } : {}), fadeMs, audio: voiceOn ? "follows" : "system" })) {
       this.deps.speak(text);                       // no overlay: the system voice
       return;
     }

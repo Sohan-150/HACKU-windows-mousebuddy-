@@ -4,10 +4,15 @@ rem (it then starts windows\). It checks Bun, installs the packages the first ti
 rem there is none, then runs scripts\start.ps1 (the Cua daemon, the preflight, the panel and the agent).
 setlocal
 title Backstage
-cd /d "%~dp0"
-if not exist "scripts\start.ps1" if exist "windows\scripts\start.ps1" cd /d "%~dp0windows"
+rem The Backstage folder to start. Leave it empty to use the folder this file is in (so this file can also be kept on
+rem the Desktop and point at the folder).
+set "APP="
+if "%APP%"=="" set "APP=%~dp0"
+cd /d "%APP%"
+if errorlevel 1 ( echo Can't open the folder "%APP%". & goto :end )
+if not exist "scripts\start.ps1" if exist "windows\scripts\start.ps1" cd /d "windows"
 if not exist "scripts\start.ps1" (
-  echo Can't find scripts\start.ps1 next to this file. Keep this file in the Backstage folder.
+  echo Can't find scripts\start.ps1 in "%CD%". Set APP at the top of this file to your Backstage folder.
   goto :end
 )
 

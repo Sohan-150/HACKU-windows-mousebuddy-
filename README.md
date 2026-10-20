@@ -91,7 +91,9 @@ Run from a normal PowerShell, never as administrator.
    ```
    The first start downloads the English `small.en` speech model (about 480 MB; it uses `small` if that can't be had).
    Settings > Privacy > Microphone must allow desktop apps.
-5. `powershell -ExecutionPolicy Bypass -File scripts\start.ps1` starts the daemon, runs the preflight and opens the panel
+5. Double-click **`Start Backstage.cmd`** (it checks Bun, runs `bun install` the first time, makes `.env` from
+   `.env.example` if there is none and opens it in Notepad, then starts everything; close its window to stop). Or
+   `powershell -ExecutionPolicy Bypass -File scripts\start.ps1` starts the daemon, runs the preflight and opens the panel
    at http://127.0.0.1:3000/. Or step by step: `scripts\daemon.ps1`, `bun run preflight`, `bun start`. The daemon is
    started with the Mac version's speed setting (300 ms window-change wait); if it was already running,
    `scripts\daemon.ps1 -Restart` restarts it with it.
